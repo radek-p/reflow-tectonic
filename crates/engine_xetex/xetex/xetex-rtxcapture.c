@@ -270,6 +270,7 @@ static bool started = false;
 static int mlist_depth = 0;
 static int disp_mlist_reset(void);
 
+static void srcpos_reset(void);
 static void rmap_free(rmap *m) { free(m->k); free(m->v); m->k = NULL; m->v = NULL; m->cap = m->n = 0; }
 
 /* Everything back to "no run yet": the driver may run the engine several
@@ -286,6 +287,7 @@ static void reset(void) {
     child = false; child_fd = -1; rtx_fork_pending = 0; mlist_depth = 0; child_done = false;
     disp_mlist_reset();
     if (rtx_capture_flags) rtx_nb = xcalloc(MEM_TOP + 1, 1);
+    srcpos_reset();
 }
 
 int rtx_set_variable(const char *name, int value) {
@@ -307,7 +309,10 @@ static void start(void) {
     rec_end();
 }
 
+static void note_user_tag(int tag, str_number name);
+
 void rtx_input_opened(void) {
+    if (RTX_ON) note_user_tag(cur_input.synctex_tag, in_open > 0 && full_source_filename_stack[in_open] ? full_source_filename_stack[in_open] : cur_name);
     if (!RTX_ON || child) return;
     start();
     rec_begin("in");
@@ -316,6 +321,453 @@ void rtx_input_opened(void) {
     if (in_open > 0 && full_source_filename_stack[in_open]) jtexstr(full_source_filename_stack[in_open]);
     else jtexstr(cur_name);
     rec_end();
+}
+
+/* ── source positions (RTX_SRCPOS) ────────────────────────────────────── */
+/* Where each typeset character came from: the file (synctex tag), line and
+ * column of its token – or, for a character a macro produced, where the
+ * outermost macro was called in a file ("via"). A position is packed into
+ * 64 bits: tag 20 | line 24 | column 16 | via 1.
+ *
+ * Tokens carry no positions in TeX. What the capture keeps:
+ *  - get_next notes the token it returns: a column of a file line, or the
+ *    token-list node it came from (RTX_TOK_FILE, RTX_TOK_NODE);
+ *  - a token stored as a macro argument, or backed up, remembers the position
+ *    of the token it copies (rtx_tokpos), so text in \emph{…} keeps its own
+ *    positions when it is read back from the argument;
+ *  - a macro called from a file remembers where (rtx_macro_enter/push): a
+ *    character from its body gets that call site, flagged via;
+ *  - a native word gets a position per UTF-16 unit of its text (collected
+ *    per character, aligned through the font's mapping and XeTeX's merging of
+ *    words), a math character field one position, and the char and glyph
+ *    nodes mlist_to_hlist makes from a noad the noad's.
+ * A byte per mem word (rtx_pb) says a word has a position; free_node and
+ * get_avail clear it, so a reused address never inherits one. */
+
+unsigned char *rtx_pb = NULL;
+int32_t rtx_tok_node = TEX_NULL, rtx_tok_col = 0, rtx_tok_line = 0, rtx_tok_tag = 0;
+
+#define PB_POS 1
+#define POS_VIA 1ull
+static uint64_t mkpos(int tag, int line, int col, bool via) {
+    if (tag < 0) tag = 0;
+    if (line < 0) line = 0;
+    if (col < 0) col = 0;
+    if (col > 0xFFFF) col = 0xFFFF;
+    return ((uint64_t) (tag & 0xFFFFF) << 44) | ((uint64_t) (line & 0xFFFFFF) << 20) | ((uint64_t) col << 4) | (via ? POS_VIA : 0);
+}
+#define POS_TAG(p) ((int) ((p) >> 44))
+#define POS_LINE(p) ((int) (((p) >> 20) & 0xFFFFFF))
+#define POS_COL(p) ((int) (((p) >> 4) & 0xFFFF))
+#define POS_VIA_OF(p) ((int) ((p) & 1))
+/* bits 1-3: how many source characters a unit stands for, when the font's
+ * mapping made one of several (`` → “, --- → —); 0 = one */
+#define POS_SPAN(p) ((int) (((p) >> 1) & 7))
+
+/* positions by mem address, with the word's content for token nodes (a
+ * token node can be reused by an inline allocation that bypasses get_avail) */
+typedef struct { int32_t *k; uint64_t *v; int32_t *c; uint32_t cap, n; } pmap;
+static pmap posm;
+#define NOCHECK INT32_MIN
+static void pmap_put(pmap *m, int32_t k, uint64_t v, int32_t c);
+static void pmap_grow(pmap *m) {
+    pmap o = *m;
+    m->cap = o.cap ? o.cap * 2 : 1 << 16;
+    m->n = 0;
+    m->k = xmalloc(sizeof(int32_t) * m->cap);
+    m->v = xmalloc(sizeof(uint64_t) * m->cap);
+    m->c = xmalloc(sizeof(int32_t) * m->cap);
+    for (uint32_t i = 0; i < m->cap; i++) m->k[i] = TEX_NULL;
+    for (uint32_t i = 0; i < o.cap; i++) if (o.k[i] != TEX_NULL) pmap_put(m, o.k[i], o.v[i], o.c[i]);
+    free(o.k); free(o.v); free(o.c);
+}
+static void pmap_put(pmap *m, int32_t k, uint64_t v, int32_t c) {
+    if ((m->n + 1) * 2 > m->cap) pmap_grow(m);
+    uint32_t h = ((uint32_t) k * 2654435761u) & (m->cap - 1);
+    while (m->k[h] != TEX_NULL && m->k[h] != k) h = (h + 1) & (m->cap - 1);
+    if (m->k[h] == TEX_NULL) m->n++;
+    m->k[h] = k; m->v[h] = v; m->c[h] = c;
+}
+static bool pmap_get(pmap *m, int32_t k, uint64_t *v, int32_t *c) {
+    if (!m->cap) return false;
+    uint32_t h = ((uint32_t) k * 2654435761u) & (m->cap - 1);
+    while (m->k[h] != TEX_NULL) {
+        if (m->k[h] == k) { *v = m->v[h]; *c = m->c[h]; return true; }
+        h = (h + 1) & (m->cap - 1);
+    }
+    return false;
+}
+
+static void setpos(int32_t addr, uint64_t pos, int32_t check) {
+    rtx_pb[addr] |= PB_POS;
+    pmap_put(&posm, addr, pos, check);
+}
+static bool getpos(int32_t addr, uint64_t *pos) {
+    if (!rtx_pb || addr == TEX_NULL || addr < 0 || addr > MEM_TOP || !(rtx_pb[addr] & PB_POS)) return false;
+    int32_t c;
+    if (!pmap_get(&posm, addr, pos, &c)) return false;
+    return c == NOCHECK || c == mem[addr].b32.s0;
+}
+
+/* native words: a position per UTF-16 unit, by node */
+typedef struct { uint64_t *pos; int n; } wpos;
+static wpos *words = NULL;
+static int nwords = 0, capwords = 0;
+static rmap word_map;           /* node → index into words */
+
+static void set_word_pos(int32_t node, const uint64_t *pos, int n) {
+    if (nwords == capwords) { capwords = capwords ? capwords * 2 : 1024; words = xrealloc(words, sizeof(wpos) * capwords); }
+    words[nwords].pos = xmalloc(sizeof(uint64_t) * (n ? n : 1));
+    memcpy(words[nwords].pos, pos, sizeof(uint64_t) * n);
+    words[nwords].n = n;
+    rtx_pb[node] |= PB_POS;
+    rmap_put(&word_map, node, nwords);
+    nwords++;
+}
+static wpos *get_word_pos(int32_t node) {
+    int64_t v;
+    if (!rtx_pb || !(rtx_pb[node] & PB_POS) || !rmap_get(&word_map, node, &v)) return NULL;
+    if (words[v].n != NATIVE_NODE_length(node)) return NULL;
+    return &words[v];
+}
+
+/* macro call sites, by input-stack level */
+typedef struct { uint64_t pos; int32_t start; bool set; bool exact; } origin;
+static origin *origins = NULL;
+static int norigins = 0;
+static uint64_t macro_cs_pos = 0;
+static bool macro_cs_known = false;
+
+static unsigned char *user_tags = NULL;
+static int n_user_tags = 0;
+
+static void srcpos_reset(void) {
+    if (user_tags) memset(user_tags, 0, n_user_tags);
+    free(rtx_pb); rtx_pb = NULL;
+    free(posm.k); free(posm.v); free(posm.c); memset(&posm, 0, sizeof posm);
+    for (int i = 0; i < nwords; i++) free(words[i].pos);
+    free(words); words = NULL; nwords = capwords = 0;
+    rmap_free(&word_map);
+    free(origins); origins = NULL; norigins = 0;
+    rtx_tok_node = TEX_NULL;
+    if (rtx_capture_flags & RTX_SRCPOS) rtx_pb = xcalloc(MEM_TOP + 1, 1);
+}
+
+static input_state_t *level(int k) { return k == input_ptr ? &cur_input : &input_stack[k]; }
+
+static bool user_tag(int tag);
+
+/* the outermost macro called from a file, on the input stack now */
+static bool via_origin(uint64_t *pos) {
+    bool found = false;
+    for (int k = input_ptr; k >= 0; k--) {
+        input_state_t *l = level(k);
+        if (l->state != TOKEN_LIST) {
+            /* no call site known: where the document's file is being read now */
+            if (!found && user_tag(l->synctex_tag) && l->loc > l->start) {
+                *pos = mkpos(l->synctex_tag, line, l->loc - l->start - 1, true);
+                found = true;
+            }
+            break;
+        }
+        if (k < norigins && origins[k].set && origins[k].start == l->start) {
+            *pos = origins[k].pos; found = true;
+            if (origins[k].exact) return true;      /* the innermost call whose own token has a position */
+        }
+    }
+    return found;
+}
+
+/* Files whose text counts as the document's: .tex (not pgf's .code.tex)
+ * and .bbl. A character from a package, a class, the .aux (a \ref's
+ * number) is placed at the document's macro call that brought it instead. */
+static void note_user_tag(int tag, str_number name) {
+    if (tag < 0 || tag > (1 << 20)) return;
+    if (tag >= n_user_tags) {
+        int n = tag * 2 + 16;
+        user_tags = xrealloc(user_tags, n);
+        memset(user_tags + n_user_tags, 0, n - n_user_tags);
+        n_user_tags = n;
+    }
+    char *s = gettexstring(name);
+    size_t l = strlen(s);
+    bool tex = l > 4 && !strcmp(s + l - 4, ".tex") && !(l > 9 && !strcmp(s + l - 9, ".code.tex"));
+    bool bbl = l > 4 && !strcmp(s + l - 4, ".bbl");
+    user_tags[tag] = tex || bbl;
+    free(s);
+}
+static bool user_tag(int tag) { return tag > 0 && tag < n_user_tags && user_tags[tag]; }
+
+/* \char: its number is scanned with a token of lookahead; the character's
+ * position is the \char's, noted before */
+static uint64_t char_num_pos;
+static int char_num_state = 0;          /* 0 none, 1 known, 2 unknown */
+static bool tok_pos(uint64_t *pos);
+void rtx_char_num(void) {
+    char_num_state = tok_pos(&char_num_pos) ? 1 : 2;
+}
+static bool take_char_num(uint64_t *pos, bool *known) {
+    if (!char_num_state) return false;
+    *known = char_num_state == 1; *pos = char_num_pos; char_num_state = 0;
+    return true;
+}
+
+/* the position of the token get_next returned last */
+static bool tok_pos(uint64_t *pos) {
+    if (rtx_tok_node == TEX_NULL) {
+        if (rtx_tok_tag <= 0) return false;
+        if (!user_tag(rtx_tok_tag)) return false;
+        *pos = mkpos(rtx_tok_tag, rtx_tok_line, rtx_tok_col, false);
+        return true;
+    }
+    if (getpos(rtx_tok_node, pos)) return true;
+    if (via_origin(pos)) { *pos |= POS_VIA; return true; }
+    return false;
+}
+
+/* only a token's own position is kept with it: a macro call site ("via")
+ * depends on where the token is used, and is found then */
+void rtx_tokpos(int32_t q) {
+    uint64_t p;
+    if (tok_pos(&p) && !(p & POS_VIA)) setpos(q, p, mem[q].b32.s0);
+}
+
+/* A delimited argument's partial match of its delimiter failed (TeX §397): TeX
+ * puts the matched tokens into the argument as copies of the delimiter's, not
+ * the ones read (verbatim's '\' before anything but \end{verbatim}). When
+ * they were characters just read from a file line, they are the characters
+ * before the current token, one column each. */
+static int partial_len = 0, partial_k = 0;
+static bool partial_ok = false;
+static uint64_t partial_base;
+void rtx_partial_begin(int32_t s, int32_t r) {
+    partial_len = 0; partial_k = 0;
+    for (int32_t t = s; t != r && t != TEX_NULL; t = LLIST_link(t)) partial_len++;
+    partial_ok = rtx_tok_node == TEX_NULL && tok_pos(&partial_base);
+}
+void rtx_partial_copy(int32_t q) {
+    int k = partial_k++;
+    if (!partial_ok || mem[q].b32.s0 >= CS_TOKEN_FLAG) return;
+    int col = POS_COL(partial_base) - (partial_len - k);
+    if (col >= 0) setpos(q, mkpos(POS_TAG(partial_base), POS_LINE(partial_base), col, false), mem[q].b32.s0);
+}
+
+void rtx_macro_enter(void) {
+    macro_cs_known = tok_pos(&macro_cs_pos);
+}
+
+static void origins_fit(void) {
+    if (input_ptr >= norigins) {
+        int n = stack_size + 1;
+        origins = xrealloc(origins, sizeof(origin) * n);
+        for (int i = norigins; i < n; i++) origins[i].set = false;
+        norigins = n;
+    }
+}
+
+/* any token list begins: what it produces is due to the token read last (a
+ * \the, an \everypar's paragraph, a backed-up token) – unless a macro, below */
+void rtx_list_push(void) {
+    origins_fit();
+    origins[input_ptr].set = false;
+    uint64_t p;
+    if (tok_pos(&p)) { origins[input_ptr].set = true; origins[input_ptr].pos = p | POS_VIA; origins[input_ptr].start = cur_input.start; origins[input_ptr].exact = !(p & POS_VIA); }
+}
+
+void rtx_macro_push(void) {
+    origins_fit();
+    origins[input_ptr].set = macro_cs_known;
+    origins[input_ptr].exact = macro_cs_known && !(macro_cs_pos & POS_VIA);
+    origins[input_ptr].pos = macro_cs_pos | POS_VIA;
+    origins[input_ptr].start = cur_input.start;
+}
+
+/* a math character field (a noad's nucleus, a script) set from the token just read */
+void rtx_fieldpos(int32_t field) {
+    uint64_t p;
+    bool k = false;
+    if ((take_char_num(&p, &k) ? k : tok_pos(&p))) setpos(field, p, NOCHECK);
+}
+
+/* a token list copied (\the of a token register): each copy keeps its token's
+ * position; a word reused without get_avail loses a stale one */
+void rtx_copytok(int32_t from, int32_t to) {
+    uint64_t p;
+    if (getpos(from, &p)) setpos(to, p, mem[to].b32.s0);
+    else rtx_pb[to] &= ~PB_POS;
+}
+
+void rtx_copypos(int32_t from, int32_t to) {
+    uint64_t p;
+    if (getpos(from, &p)) setpos(to, p, NOCHECK);
+}
+
+/* mlist_to_hlist made the noad q into new_hlist(q): its characters (and
+ * glyphs) that have no position of their own get the noad's */
+static void mark_list(int32_t p, uint64_t pos) {
+    for (; p != TEX_NULL; p = LLIST_link(p)) {
+        if (is_char_node(p)) { if (!(rtx_pb[p] & PB_POS)) setpos(p, pos, mem[p].b32.s0); continue; }
+        switch (NODE_type(p)) {
+        case HLIST_NODE: case VLIST_NODE: mark_list(BOX_list_ptr(p), pos); break;
+        case WHATSIT_NODE:
+            if (NODE_subtype(p) == GLYPH_NODE && !(rtx_pb[p] & PB_POS)) setpos(p, pos, NOCHECK);
+            break;
+        default: break;
+        }
+    }
+}
+void rtx_noad_done(int32_t q) {
+    uint64_t pos;
+    /* (a \left or \right noad's field is its delimiter until the second pass) */
+    if (NODE_type(q) == LEFT_NOAD || NODE_type(q) == RIGHT_NOAD) return;
+    if (getpos(q + 1, &pos)) mark_list(mem[q + 1].b32.s1, pos);
+}
+/* make_left_right has put the delimiter's box where the field was */
+void rtx_lr_done(int32_t q) {
+    uint64_t pos;
+    if (getpos(q + 1, &pos)) mark_list(mem[q + 1].b32.s1, pos);
+}
+
+/* ── native words: per character, through mapping and merging ── */
+static uint64_t *npos = NULL;              /* parallel to native_text while collecting */
+static int npos_cap = 0;
+static uint16_t *raw_txt = NULL;
+static uint64_t *raw_pos = NULL;
+static int raw_n = 0, raw_cap = 0;
+static int32_t saved_tail = TEX_NULL, saved_prev = TEX_NULL;
+static uint64_t *old_pos = NULL;
+static int old_n = 0;
+static bool collecting = false;
+
+void rtx_native_char(void) {
+    uint64_t p = 0;
+    bool known = false;
+    if (!take_char_num(&p, &known)) known = tok_pos(&p);
+    int need = native_len + 2;
+    if (need > npos_cap) { npos_cap = need * 2; npos = xrealloc(npos, sizeof(uint64_t) * npos_cap); }
+    npos[native_len] = known ? p : 0;
+    npos[native_len + 1] = known ? p : 0;
+}
+
+void rtx_native_collected(void) {
+    raw_n = native_len;
+    if (raw_n > raw_cap) { raw_cap = raw_n * 2; raw_txt = xrealloc(raw_txt, 2 * raw_cap); raw_pos = xrealloc(raw_pos, 8 * raw_cap); }
+    for (int i = 0; i < raw_n; i++) { raw_txt[i] = native_text[i]; raw_pos[i] = i < npos_cap ? npos[i] : 0; }
+    saved_tail = cur_list.tail;
+    saved_prev = TEX_NULL;
+    old_n = 0;
+    /* XeTeX may merge this word into the native word before it (same font,
+     * nothing but the word between): remember that word and its positions */
+    int32_t t = saved_tail;
+    if (t != TEX_NULL && !is_char_node(t) && NODE_type(t) == WHATSIT_NODE
+        && (NODE_subtype(t) == NATIVE_WORD_NODE || NODE_subtype(t) == NATIVE_WORD_NODE_AT)) {
+        wpos *w = get_word_pos(t);
+        if (w) { old_pos = xrealloc(old_pos, 8 * (w->n + 1)); memcpy(old_pos, w->pos, 8 * w->n); old_n = w->n; }
+        else { old_pos = xrealloc(old_pos, 8 * (NATIVE_NODE_length(t) + 1)); memset(old_pos, 0, 8 * NATIVE_NODE_length(t)); old_n = NATIVE_NODE_length(t); }
+        int32_t q = cur_list.head;
+        while (q != TEX_NULL && LLIST_link(q) != t) q = LLIST_link(q);
+        saved_prev = q;
+    }
+    rtx_pb[saved_tail] |= 2;                     /* still there at the end: not merged */
+    collecting = true;
+}
+
+static bool is_word(int32_t p) {
+    return p != TEX_NULL && !is_char_node(p) && NODE_type(p) == WHATSIT_NODE
+        && (NODE_subtype(p) == NATIVE_WORD_NODE || NODE_subtype(p) == NATIVE_WORD_NODE_AT);
+}
+
+void rtx_native_done(void) {
+    if (!collecting) return;
+    collecting = false;
+    bool merged = !(rtx_pb[saved_tail] & 2);
+    rtx_pb[saved_tail] &= ~2;
+    int32_t start = merged ? (saved_prev == TEX_NULL ? TEX_NULL : LLIST_link(saved_prev)) : LLIST_link(saved_tail);
+    if (start == TEX_NULL) return;
+    /* the text of the words made from this run */
+    int total = 0;
+    for (int32_t p = start; p != TEX_NULL; p = LLIST_link(p)) if (is_word(p)) total += NATIVE_NODE_length(p);
+    int pre = merged ? old_n : 0;
+    int mapped_n = total - pre;
+    if (mapped_n < 0) return;
+    uint16_t *mt = xmalloc(2 * (mapped_n + 1));
+    uint64_t *all = xmalloc(8 * (total + 1));
+    int k = 0;
+    for (int32_t p = start; p != TEX_NULL; p = LLIST_link(p)) if (is_word(p))
+        for (int i = 0; i < NATIVE_NODE_length(p); i++, k++) if (k >= pre) mt[k - pre] = NATIVE_NODE_text(p)[i];
+    for (int i = 0; i < pre; i++) all[i] = old_pos[i];
+    /* raw (as typed) → mapped (after the font's mapping: -- → –, `` → “):
+     * equal units pair up; a mapped unit that differs takes the raw units up
+     * to the next that equals the next mapped unit, and the first one's
+     * position (its extent is recovered by the converter from the source) */
+    int i = 0, j = 0;
+    while (j < mapped_n) {
+        if (i < raw_n && raw_txt[i] == mt[j]) { all[pre + j] = raw_pos[i]; i++; j++; continue; }
+        all[pre + j] = i < raw_n ? raw_pos[i] : (i > 0 ? raw_pos[i - 1] : 0);
+        int i2 = i + 1;
+        if (j + 1 < mapped_n) while (i2 < raw_n && raw_txt[i2] != mt[j + 1]) i2++;
+        else i2 = raw_n;
+        if (i < raw_n && i2 - i > 1 && !(all[pre + j] & POS_VIA)) all[pre + j] |= (uint64_t) ((i2 - i > 7 ? 7 : i2 - i) & 7) << 1;
+        i = i2 > i ? i2 : i + 1;
+        j++;
+    }
+    /* hand each word its slice */
+    k = 0;
+    for (int32_t p = start; p != TEX_NULL; p = LLIST_link(p)) if (is_word(p)) {
+        set_word_pos(p, all + k, NATIVE_NODE_length(p));
+        k += NATIVE_NODE_length(p);
+    }
+    free(mt); free(all);
+}
+
+/* hpack joins adjacent words of one font (and words split by an unused
+ * discretionary) into one node: its positions are theirs, in order */
+void rtx_merge_words(int32_t merged, int32_t chain) {
+    int n = NATIVE_NODE_length(merged), k = 0;
+    uint64_t *all = xcalloc(n + 1, sizeof(uint64_t));
+    bool any = false;
+    for (int32_t p = chain; p != TEX_NULL && k < n; p = LLIST_link(p)) {
+        if (!is_word(p)) continue;
+        wpos *w = get_word_pos(p);
+        for (int i = 0; i < NATIVE_NODE_length(p) && k < n; i++, k++) if (w) { all[k] = w->pos[i]; any = true; }
+    }
+    if (any) set_word_pos(merged, all, n);
+    free(all);
+}
+
+/* JSON: a native word's positions as runs of units at consecutive columns:
+ * [[n, tag, line, col, via], …] */
+static void jword_src(int32_t p) {
+    wpos *w = get_word_pos(p);
+    if (!w) return;
+    jkey("src"); jopen('[');
+    int i = 0;
+    while (i < w->n) {
+        uint64_t a = w->pos[i];
+        int n = 1, cp = 0;
+        while (i + n < w->n) {
+            uint64_t b = w->pos[i + n];
+            if (POS_TAG(b) != POS_TAG(a) || POS_LINE(b) != POS_LINE(a) || POS_VIA_OF(b) != POS_VIA_OF(a)) break;
+            if (POS_SPAN(a) || POS_SPAN(b)) break;
+            /* columns count code points; a low surrogate shares its pair's */
+            int cp2 = cp + ((NATIVE_NODE_text(p)[i + n] & 0xFC00) == 0xDC00 ? 0 : 1);
+            if (POS_COL(b) - POS_COL(a) != (POS_VIA_OF(a) ? 0 : cp2)) break;
+            cp = cp2;
+            n++;
+        }
+        jopen('['); jnum(n); jnum(POS_TAG(a)); jnum(POS_LINE(a)); jnum(POS_COL(a)); jnum(POS_VIA_OF(a));
+        if (POS_SPAN(a)) jnum(POS_SPAN(a));
+        jclose(']');
+        i += n;
+    }
+    jclose(']');
+}
+static void jpos(const char *k, uint64_t p) {
+    jkey(k); jopen('['); jnum(POS_TAG(p)); jnum(POS_LINE(p)); jnum(POS_COL(p)); jnum(POS_VIA_OF(p)); jclose(']');
+}
+static void jnode_src(int32_t p) {
+    uint64_t pos;
+    if (getpos(p, &pos)) jpos("src", pos);
 }
 
 /* ── node serializer ──────────────────────────────────────────────────── */
@@ -463,6 +915,7 @@ static void ser_native_word(int32_t p, hyctx *hy) {
     if (NODE_subtype(p) == NATIVE_WORD_NODE_AT) jint("at", 1);
     jint("f", f);
     jkey("s"); jutf16(text, n);
+    if (rtx_pb) jword_src(p);
     jint("w", BOX_width(p)); jint("h", BOX_height(p)); jint("d", BOX_depth(p));
     jkey("gi"); jopen('['); for (int i = 0; i < g; i++) { jnum(ids[i]); note_glyph(f, ids[i]); } jclose(']');
     jkey("gx"); jopen('['); for (int i = 0; i < g; i++) jnum(loc[i].x); jclose(']');
@@ -582,6 +1035,7 @@ static void ser_node(int32_t p, int mode, hyctx *hy) {
         jint("f", CHAR_NODE_font(p));
         jint("c", CHAR_NODE_character(p));
         note_glyph(CHAR_NODE_font(p), CHAR_NODE_character(p));
+        if (rtx_pb) jnode_src(p);
         jclose('}');
         return;
     }
@@ -663,6 +1117,7 @@ static void ser_node(int32_t p, int mode, hyctx *hy) {
         case GLYPH_NODE:
             jcstr("t", "G");
             jint("f", NATIVE_NODE_font(p)); jint("g", NATIVE_NODE_glyph(p));
+            if (rtx_pb) jnode_src(p);
             note_glyph(NATIVE_NODE_font(p), NATIVE_NODE_glyph(p));
             jint("w", BOX_width(p)); jint("h", BOX_height(p)); jint("d", BOX_depth(p));
             break;
@@ -1334,6 +1789,7 @@ static void ser_field(const char *k, int32_t x) {
         jint("fam", mem[x].b16.s1 % 256);
         jint("c", mem[x].b16.s0 + (mem[x].b16.s1 / 256) * 65536);
         if (mt == MATH_TEXT_CHAR) jint("text", 1);
+        if (rtx_pb) jnode_src(x);
         break;
     case SUB_BOX:
         jkey("box"); ser_node(mem[x].b32.s0, 0, NULL);

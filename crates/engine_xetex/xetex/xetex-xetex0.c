@@ -186,6 +186,7 @@ int32_t get_avail(void)
         }
     }
     mem[p].b32.s1 = TEX_NULL;
+    RTX_FREE(p);   /* a reused word keeps no mark */
     return p;
 }
 
@@ -284,7 +285,7 @@ found:
 void free_node(int32_t p, int32_t s)
 {
     int32_t q;
-    RTX_FREE(p);
+    RTX_FREE_N(p, s);
     mem[p].b32.s0 = s;
     mem[p].b32.s1 = MAX_HALFWORD;
     q = mem[rover + 1].b32.s0;
@@ -4895,6 +4896,7 @@ begin_token_list(int32_t p, uint16_t t)
     cur_input.state = TOKEN_LIST;
     cur_input.start = p;
     cur_input.index = t;
+    RTX_SRC(rtx_list_push());
 
     if (t >= MACRO) {
         mem[p].b32.s0++;
@@ -4967,6 +4969,7 @@ void back_input(void)
         end_token_list();
     p = get_avail();
     mem[p].b32.s0 = cur_tok;
+    RTX_TOKPOS(p);
     if (cur_tok < RIGHT_BRACE_LIMIT) {
 
         if (cur_tok < LEFT_BRACE_LIMIT)
@@ -5170,6 +5173,7 @@ restart:
     if (cur_input.state != TOKEN_LIST) { /*355:*/
     texswitch:
         if (cur_input.loc <= cur_input.limit) {
+            RTX_TOK_FILE();
             cur_chr = buffer[cur_input.loc];
             cur_input.loc++;
 
@@ -5584,6 +5588,7 @@ restart:
             goto texswitch;
         }
     } else if (cur_input.loc != TEX_NULL) { /* if we're inputting from a non-null token list: */
+        RTX_TOK_NODE();
         t = mem[cur_input.loc].b32.s0;
         cur_input.loc = LLIST_link(cur_input.loc);
 
@@ -5678,6 +5683,7 @@ macro_call(void)
 
     save_scanner_status = scanner_status;
     save_warning_index = warning_index;
+    RTX_SRC(rtx_macro_enter());
     warning_index = cur_cs;
     ref_count = cur_chr;
     r = mem[ref_count].b32.s1;
@@ -5768,10 +5774,12 @@ macro_call(void)
                 } else {
                     t = s;
 
+                    RTX_SRC(rtx_partial_begin(s, r));
                     do {
                         q = get_avail();
                         mem[p].b32.s1 = q;
                         mem[q].b32.s0 = mem[t].b32.s0;
+                        RTX_SRC(rtx_partial_copy(q));
                         p = q;
 
                         m++;
@@ -5843,6 +5851,7 @@ macro_call(void)
 
                         mem[p].b32.s1 = q;
                         mem[q].b32.s0 = cur_tok;
+                        RTX_TOKPOS(q);
                         p = q;
 
                         get_token();
@@ -5890,6 +5899,7 @@ macro_call(void)
                     q = get_avail();
                     mem[p].b32.s1 = q;
                     mem[q].b32.s0 = cur_tok;
+                    RTX_TOKPOS(q);
                     p = q;
                 } else { /*413:*/
                     back_input();
@@ -5923,6 +5933,7 @@ macro_call(void)
                 q = get_avail();
                 mem[p].b32.s1 = q;
                 mem[q].b32.s0 = cur_tok;
+                RTX_TOKPOS(q);
                 p = q;
             }
 
@@ -5969,6 +5980,7 @@ macro_call(void)
         end_token_list();
 
     begin_token_list(ref_count, MACRO);
+    RTX_SRC(rtx_macro_push());
     cur_input.name = warning_index;
     cur_input.loc = mem[r].b32.s1;
 
@@ -6816,6 +6828,7 @@ reswitch:
     else
         mem[p].b16.s1 = (math_fam(c));
     mem[p].b16.s1 = mem[p].b16.s1 + (math_char(c) / 65536L) * 256;
+    RTX_SRC(rtx_fieldpos(p));
 }
 
 void set_math_char(int32_t c)
@@ -6846,6 +6859,7 @@ void set_math_char(int32_t c)
         mem[p + 1].b16.s1 = mem[p + 1].b16.s1 + (ch / 65536L) * 256;
         mem[cur_list.tail].b32.s1 = p;
         cur_list.tail = p;
+        RTX_SRC(rtx_fieldpos(p + 1));
     }
 }
 
@@ -9249,6 +9263,7 @@ int32_t the_toks(void)
                     }
                     mem[p].b32.s1 = q;
                     mem[q].b32.s0 = mem[r].b32.s0;
+                    RTX_SRC(rtx_copytok(r, q));
                     p = q;
                 }
                 r = LLIST_link(r);
@@ -10015,6 +10030,7 @@ int32_t scan_toks(bool macro_def, bool xpand)
             q = get_avail();
             mem[p].b32.s1 = q;
             mem[q].b32.s0 = cur_tok;
+            RTX_TOKPOS(q);
             p = q;
         }
     }
@@ -12307,6 +12323,7 @@ int32_t hpack(int32_t p, scaled_t w, small_number m)
                                     }
                                     ppp = LLIST_link(ppp);
                                 } while (!((ppp == TEX_NULL)));
+                                RTX_SRC(rtx_merge_words(pp, p));
                                 flush_node_list(p);
                                 p = mem[q].b32.s1;
                                 set_native_metrics(p, (INTPAR(xetex_use_glyph_metrics) > 0));
@@ -16892,6 +16909,7 @@ handle_right_brace(void)
                     if (mem[p + 3].b32.s1 == EMPTY) {
                         if (mem[p + 2].b32.s1 == EMPTY) {
                             mem[save_stack[save_ptr + 0].b32.s1].b32 = mem[p + 1].b32;
+                            RTX_SRC(rtx_copypos(p + 1, save_stack[save_ptr + 0].b32.s1));
                             free_node(p, NOAD_SIZE);
                         }
                     }
@@ -16944,6 +16962,7 @@ reswitch:
         break;
 
     case HMODE + CHAR_NUM:
+        RTX_SRC(rtx_char_num());
         scan_usv_num();
         cur_chr = cur_val;
         goto main_loop;
@@ -17311,6 +17330,7 @@ reswitch:
         break;
 
     case MMODE + CHAR_NUM:
+        RTX_SRC(rtx_char_num());
         scan_char_num();
         cur_chr = cur_val;
         set_math_char(MATH_CODE(cur_chr));
@@ -17518,6 +17538,7 @@ main_loop: /*1069: */
         native_len = 0;
 
 collect_native:
+        RTX_SRC(rtx_native_char());
         main_s = SF_CODE(cur_chr) % 65536L;
 
         if (main_s == 1000) {
@@ -17601,6 +17622,7 @@ collect_native:
             goto collect_native;
 
         if (cur_cmd == CHAR_NUM) {
+            RTX_SRC(rtx_char_num());
             scan_usv_num();
             cur_chr = cur_val;
             goto collect_native;
@@ -17625,6 +17647,7 @@ collect_native:
         }
 
 collected:
+        RTX_SRC(rtx_native_collected());
         if ((font_mapping[main_f] != NULL)) {
             main_k = apply_mapping(font_mapping[main_f], native_text, native_len);
             native_len = 0;
@@ -17852,6 +17875,7 @@ collected:
             }
         }
 
+        RTX_SRC(rtx_native_done());
         if (INTPAR(xetex_interword_space_shaping) > 0) {
             main_p = cur_list.head;
             main_pp = TEX_NULL;

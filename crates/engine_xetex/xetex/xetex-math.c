@@ -734,6 +734,7 @@ void math_left_right(void)
         p = new_noad();
         mem[p].b16.s1 = t;
         scan_delimiter(p + 1, false);
+        RTX_SRC(rtx_fieldpos(p + 1));   /* \left( : the delimiter's token */
         if (t == 1) {
             mem[p].b16.s1 = RIGHT_NOAD;
             mem[p].b16.s0 = 1;
@@ -1651,6 +1652,7 @@ clean_box(int32_t p, small_number s)
         {
             cur_mlist = new_noad();
             mem[cur_mlist + 1] = mem[p];
+            RTX_SRC(rtx_copypos(p, cur_mlist + 1));
         }
         break;
     case 2:
@@ -3178,6 +3180,7 @@ mlist_to_hlist(void)
             max_d = mem[z + 2].b32.s1;
         free_node(z, BOX_NODE_SIZE);
  lab80:                        /*done_with_noad */ r = q;
+        RTX_SRC(rtx_noad_done(q));
         r_type = mem[r].b16.s1;
         if (r_type == RIGHT_NOAD) {
             r_type = LEFT_NOAD;
@@ -3248,6 +3251,7 @@ mlist_to_hlist(void)
         case LEFT_NOAD:
         case RIGHT_NOAD:
             t = make_left_right(q, style, max_d, max_h);
+            RTX_SRC(rtx_lr_done(q));
             break;
         case STYLE_NODE:
             {

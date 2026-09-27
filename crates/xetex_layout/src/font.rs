@@ -600,3 +600,14 @@ pub(crate) fn get_file_name_from_ct_font(ct_font: &CTFont, index: &mut u32) -> O
         None
     }
 }
+
+// reflowtex capture: font units, for exact glyph metrics.
+impl Font {
+    pub(crate) fn rtx_units_per_em(&self) -> u32 {
+        self.units_per_em as u32
+    }
+
+    pub(crate) fn rtx_advance_units(&self, gid: u32) -> i32 {
+        get_glyph_advance(&self.ft_face(), gid, false) as i32
+    }
+}

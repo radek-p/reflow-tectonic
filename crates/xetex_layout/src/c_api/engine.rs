@@ -563,3 +563,42 @@ pub unsafe extern "C" fn findNextGraphiteBreak(engine: XeTeXLayoutEngine) -> lib
         -1
     }
 }
+
+// ── reflowtex capture ─────────────────────────────────────
+// The HarfBuzz buffer of the last layoutChars call, in font units, with each
+// glyph's cluster (UTF-16 index): what the capture records per native word.
+// Returns the glyph count; copies at most `max` entries into each array.
+#[no_mangle]
+pub unsafe extern "C" fn rtx_layout_raw(
+    engine: XeTeXLayoutEngine,
+    max: i32,
+    clusters: *mut u32,
+    x_advance: *mut i32,
+    y_advance: *mut i32,
+    x_offset: *mut i32,
+    y_offset: *mut i32,
+) -> i32 {
+    let engine = &*engine;
+    let buf = engine.hb_buffer();
+    let infos = buf.glyph_info().unwrap_or(&[]);
+    let pos = buf.glyph_positions().unwrap_or(&[]);
+    let n = infos.len().min(pos.len());
+    for i in 0..n.min(max.max(0) as usize) {
+        *clusters.add(i) = infos[i].cluster;
+        *x_advance.add(i) = pos[i].x_advance;
+        *y_advance.add(i) = pos[i].y_advance;
+        *x_offset.add(i) = pos[i].x_offset;
+        *y_offset.add(i) = pos[i].y_offset;
+    }
+    n as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtx_font_units_per_em(engine: XeTeXLayoutEngine) -> u32 {
+    (*engine).font().rtx_units_per_em()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rtx_glyph_advance_units(engine: XeTeXLayoutEngine, gid: u32) -> i32 {
+    (*engine).font().rtx_advance_units(gid)
+}

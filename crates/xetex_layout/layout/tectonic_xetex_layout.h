@@ -78,6 +78,8 @@ void set_cp_code(int32_t font_num, uint32_t code, int32_t side, int32_t value);
 
 int32_t get_cp_code(int32_t font_num, uint32_t code, int32_t side);
 
+void ttxl_reset_font_caches(void);
+
 XeTeXLayoutEngine createLayoutEngine(XeTeXFont font,
                                      hb_tag_t script,
                                      char *language,

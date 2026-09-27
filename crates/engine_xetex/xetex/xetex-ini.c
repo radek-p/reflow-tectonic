@@ -3561,6 +3561,10 @@ tt_run_engine(const char *dump_name, const char *input_file_name, time_t build_d
 {
     int32_t font_k;
 
+    /* The layout crate's glyph-box and protrusion caches are keyed by font
+     * number, which is per run: start each run with them empty. */
+    ttxl_reset_font_caches();
+
     /* Miscellaneous initializations that were mostly originally done in the
      * main() driver routines. */
 

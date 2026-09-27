@@ -104,3 +104,15 @@ pub extern "C" fn get_cp_code(font_num: i32, code: u32, side: i32) -> i32 {
     }
     .unwrap_or(0)
 }
+
+/// Forget the per-font caches above. They are keyed by the engine's font
+/// *number*, which only means something within one run: a second run in the
+/// same process (TeX's next pass, a page compiling again in wasm) numbers its
+/// fonts afresh and would read another font's glyph boxes and protrusion
+/// codes. Called at the start of every run (xetex-ini.c).
+#[no_mangle]
+pub extern "C" fn ttxl_reset_font_caches() {
+    GLYPH_BOXES.lock().unwrap().clear();
+    LEFT_PROT.lock().unwrap().clear();
+    RIGHT_PROT.lock().unwrap().clear();
+}

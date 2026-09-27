@@ -426,6 +426,8 @@ build_page(void)
     if (LLIST_link(CONTRIB_HEAD) == TEX_NULL || output_active)
         return;
 
+    if (RTX_ON) rtx_build_page();
+
     do {
         p = LLIST_link(CONTRIB_HEAD);
 

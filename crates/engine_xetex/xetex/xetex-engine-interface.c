@@ -34,6 +34,8 @@ tt_xetex_set_int_variable (const char *var_name, int value)
         semantic_pagination_enabled = (value != 0);
     else if (streq_ptr(var_name, "shell_escape_enabled"))
         shell_escape_enabled = (value != 0);
+    else if (rtx_set_variable(var_name, value) == 0)
+        ; /* reflowtex capture (xetex-rtxcapture.c) */
     else
         return 1; /* Uh oh: unrecognized variable */
 

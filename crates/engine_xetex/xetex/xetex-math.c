@@ -323,6 +323,7 @@ void init_math(void)
         eq_word_define(INT_BASE + INT_PAR__pre_display_direction, x);
         eq_word_define(DIMEN_BASE + DIMEN_PAR__display_width, l);
         eq_word_define(DIMEN_BASE + DIMEN_PAR__display_indent, s);
+        if (RTX_ON) rtx_display_begin();
 
         /* Tectonic customization: flag canvas start */
         if (semantic_pagination_enabled)
@@ -1123,6 +1124,7 @@ void after_math(void)
                 }
             }
         }
+        if (RTX_ON) rtx_display_append_begin();
         {
             mem[cur_list.tail].b32.s1 = new_penalty(INTPAR(pre_display_penalty));
             cur_list.tail = LLIST_link(cur_list.tail);
@@ -1190,6 +1192,7 @@ void after_math(void)
         if (semantic_pagination_enabled)
             tt_insert_special("tdux:ce dmath");
 
+        if (RTX_ON) rtx_display_end(e, q, d, l, g1, g2, danger, math_quad(TEXT_SIZE));
         resume_after_display();
     }
 }
@@ -2916,6 +2919,7 @@ mlist_to_hlist(void)
     scaled_t max_h, max_d;
     scaled_t delta;
 
+    if (RTX_ON) rtx_mlist_enter(cur_mlist, cur_style);
     mlist = cur_mlist;
     penalties = mlist_penalties;
     style = cur_style;
@@ -3364,6 +3368,7 @@ mlist_to_hlist(void)
     done:
         ;
     }
+    if (RTX_ON) rtx_mlist_exit();
 }
 
 

@@ -134,6 +134,7 @@ line_break(bool d)
     init_r_hyf = (cur_list.prev_graf / 65536L) % 64;
 
     pop_nest();
+    if (RTX_ON) rtx_par_begin(d, init_cur_lang, init_l_hyf, init_r_hyf);
 
     no_shrink_error_yet = true;
 
@@ -942,6 +943,7 @@ done:
         }
     }
 
+    if (RTX_ON) rtx_par_breaks(best_bet, best_line, fewest_demerits, INTPAR(looseness) ? actual_looseness : 0, second_pass, final_pass);
     post_line_break(d);
 
     /* Clean up by removing break nodes (894, again) */
@@ -1260,6 +1262,7 @@ post_line_break(bool d)
 
         pre_adjust_tail = TEX_NULL;
         append_to_vlist(just_box);
+        if (RTX_ON) rtx_line(just_box, cur_line);
 
         if (ADJUST_HEAD != adjust_tail) {
             LLIST_link(cur_list.tail) = LLIST_link(ADJUST_HEAD);

@@ -17,6 +17,7 @@ typedef unsigned char eight_bits;
 
 #include "xetex_format.h"
 #include "xetex-constants.h"
+#include "xetex-rtxcapture.h"
 
 BEGIN_EXTERN_C
 

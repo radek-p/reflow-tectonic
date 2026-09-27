@@ -284,6 +284,7 @@ found:
 void free_node(int32_t p, int32_t s)
 {
     int32_t q;
+    RTX_FREE(p);
     mem[p].b32.s0 = s;
     mem[p].b32.s1 = MAX_HALFWORD;
     q = mem[rover + 1].b32.s0;
@@ -11052,6 +11053,7 @@ start_input(const char *primary_input_name)
     cur_input.state = NEW_LINE;
 
     synctex_start_input();
+    if (RTX_ON) rtx_input_opened();
 
     line = 1;
     input_line(input_file[cur_input.index]);
@@ -13556,6 +13558,7 @@ void fin_align(void)
         }
         flush_node_list(cur_list.eTeX_aux);
         pop_nest();
+        if (RTX_ON) rtx_display_append_begin();
         {
             mem[cur_list.tail].b32.s1 = new_penalty(INTPAR(pre_display_penalty));
             cur_list.tail = LLIST_link(cur_list.tail);
@@ -13576,6 +13579,7 @@ void fin_align(void)
             cur_list.tail = LLIST_link(cur_list.tail);
         }
         cur_list.aux.b32.s1 = aux_save.b32.s1;
+        if (RTX_ON) rtx_display_align_end();
         resume_after_display();
     } else {
 
@@ -14172,6 +14176,7 @@ void app_space(void)
     }
     mem[cur_list.tail].b32.s1 = q;
     cur_list.tail = q;
+    RTX_MARK(q, RTX_NB_SPACE);
 }
 
 void
@@ -15101,14 +15106,14 @@ void append_italic_correction(void)
                     mem[cur_list.tail].b32.s1 = new_kern(get_native_italic_correction(cur_list.tail));
                     cur_list.tail = LLIST_link(cur_list.tail);
                 }
-                NODE_subtype(cur_list.tail) = EXPLICIT;
+                NODE_subtype(cur_list.tail) = EXPLICIT; RTX_MARK(cur_list.tail, RTX_NB_ITALIC);
             } else if (mem[cur_list.tail].b16.s0 == GLYPH_NODE) {
                 {
                     mem[cur_list.tail].b32.s1 =
                         new_kern(get_native_glyph_italic_correction(cur_list.tail));
                     cur_list.tail = LLIST_link(cur_list.tail);
                 }
-                NODE_subtype(cur_list.tail) = EXPLICIT;
+                NODE_subtype(cur_list.tail) = EXPLICIT; RTX_MARK(cur_list.tail, RTX_NB_ITALIC);
             }
             return;
         } else
@@ -15119,7 +15124,7 @@ void append_italic_correction(void)
                 new_kern(FONT_CHARINFO_ITALCORR(f, FONT_CHARACTER_INFO(f, effective_char(true, f, CHAR_NODE_character(p)))));
             cur_list.tail = LLIST_link(cur_list.tail);
         }
-        NODE_subtype(cur_list.tail) = EXPLICIT;
+        NODE_subtype(cur_list.tail) = EXPLICIT; RTX_MARK(cur_list.tail, RTX_NB_ITALIC);
     }
 }
 
@@ -16922,6 +16927,7 @@ main_control(void)
         begin_token_list(LOCAL(every_job), EVERY_JOB_TEXT);
 
 big_switch: /* big_switch */
+    if (rtx_fork_pending) rtx_big_switch();
     get_x_token();
 
 reswitch:
@@ -18404,6 +18410,7 @@ append_normal_space:
 
     mem[cur_list.tail].b32.s1 = temp_ptr;
     cur_list.tail = temp_ptr;
+    RTX_MARK(temp_ptr, RTX_NB_SPACE);
     goto big_switch;
 }
 
@@ -18419,6 +18426,8 @@ void
 close_files_and_terminate(void)
 {
     int32_t k;
+
+    if (RTX_ON) rtx_finish();
 
     for (k = 0; k <= 15; k++) {
         if (write_open[k])

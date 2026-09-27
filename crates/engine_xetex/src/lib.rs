@@ -83,6 +83,8 @@ pub struct TexEngine {
     semantic_pagination_enabled: bool,
     shell_escape_enabled: bool,
     build_date: SystemTime,
+    rtx_capture: i32,
+    rtx_samples: Vec<i32>,
 }
 
 impl Default for TexEngine {
@@ -94,6 +96,8 @@ impl Default for TexEngine {
             semantic_pagination_enabled: false,
             shell_escape_enabled: false,
             build_date: SystemTime::UNIX_EPOCH,
+            rtx_capture: 0,
+            rtx_samples: Vec::new(),
         }
     }
 }
@@ -159,6 +163,15 @@ impl TexEngine {
         self
     }
 
+    /// reflowtex capture API: write `<jobname>.rtxc.jsonl`.
+    /// `flags`: 1 capture, 2 pageless, 4 math lists, 8 display samples at the
+    /// given width offsets (sp). 0 (the default) leaves the engine untouched.
+    pub fn rtx_capture(&mut self, flags: i32, samples: &[i32]) -> &mut Self {
+        self.rtx_capture = flags;
+        self.rtx_samples = samples.to_vec();
+        self
+    }
+
     /// Process a document using the current engine configuration.
     ///
     /// The *launcher* parameter gives overarching environmental context in
@@ -203,6 +216,10 @@ impl TexEngine {
                     c"semantic_pagination_enabled".as_ptr(),
                     self.semantic_pagination_enabled.into(),
                 );
+                tt_xetex_set_int_variable(c"rtx_capture".as_ptr(), self.rtx_capture);
+                for s in &self.rtx_samples {
+                    tt_xetex_set_int_variable(c"rtx_sample".as_ptr(), *s);
+                }
 
                 tt_engine_xetex_main(
                     state,

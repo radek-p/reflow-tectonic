@@ -212,6 +212,7 @@ const C_FILES: &[&str] = &[
     "xetex/xetex-synctex.c",
     "xetex/xetex-texmfmp.c",
     "xetex/xetex-xetex0.c",
+    "xetex/xetex-rtxcapture.c",
 ];
 
 const CXX_FLAGS: &[&str] = &[

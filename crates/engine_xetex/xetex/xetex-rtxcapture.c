@@ -271,6 +271,7 @@ static int mlist_depth = 0;
 static int disp_mlist_reset(void);
 
 static void srcpos_reset(void);
+static void attrs_reset(void);
 static void rmap_free(rmap *m) { free(m->k); free(m->v); m->k = NULL; m->v = NULL; m->cap = m->n = 0; }
 
 /* Everything back to "no run yet": the driver may run the engine several
@@ -287,6 +288,7 @@ static void reset(void) {
     child = false; child_fd = -1; rtx_fork_pending = 0; mlist_depth = 0; child_done = false;
     disp_mlist_reset();
     if (rtx_capture_flags) rtx_nb = xcalloc(MEM_TOP + 1, 1);
+    attrs_reset();
     srcpos_reset();
 }
 
@@ -299,6 +301,8 @@ int rtx_set_variable(const char *name, int value) {
 static void start(void) {
     if (started) return;
     started = true;
+    /* attributes from here on: the format is loaded, nothing typeset yet */
+    if ((rtx_capture_flags & RTX_ATTRS) && !rtx_ab) rtx_ab = xcalloc(MEM_TOP + 1, sizeof(uint16_t));
     rec_begin("hdr");
     jint("v", 1);
     jint("flags", rtx_capture_flags);
@@ -628,6 +632,162 @@ void rtx_lr_done(int32_t q) {
     if (getpos(q + 1, &pos)) mark_list(mem[q + 1].b32.s1, pos);
 }
 
+/* ── attributes (RTX_ATTRS, patch 0005) ───────────────────────────────── */
+/* \attribute909..917 are \count32000..32008 (rtx-xetex.sty: \count(31091+N),
+ * the top of the range, clear of LaTeX's allocator), e-TeX sparse registers:
+ * read with find_sa_element only when one may have changed (sa_w_def, gsa_w_def, sa_restore say so), else
+ * the last tuple's id is reused. Tuples are interned; values <= 0 are "unset"
+ * (LuaTeX's unset attribute), stored as 0. */
+#define ATTR_FIRST 32000   /* \attribute909 */
+#define ATTR_N 9           /* 909-916: reflowtex.sty; 917: \addvspace (rtx-xetex.sty) */
+#define ATTR_MAX 0x7FFF
+uint16_t *rtx_ab = NULL;
+bool rtx_attr_dirty = true;
+uint16_t rtx_attr_cur = 0;
+static int32_t (*asets)[ATTR_N] = NULL;   /* id -> tuple; id 0 = all unset */
+static int nasets = 0, capasets = 0, aoverflow = 0;
+static uint16_t *ahash = NULL;            /* open addressing over tuple ids */
+static uint32_t ahcap = 0;
+typedef struct { uint16_t *a; int n; } wattr;
+static wattr *wattrs = NULL;              /* per-character ids of mixed words */
+static int nwattrs = 0, capwattrs = 0;
+static rmap wattr_map;                    /* node -> index into wattrs */
+static bool is_word_node(int32_t p) {
+    return p != TEX_NULL && !is_char_node(p) && NODE_type(p) == WHATSIT_NODE
+        && (NODE_subtype(p) == NATIVE_WORD_NODE || NODE_subtype(p) == NATIVE_WORD_NODE_AT);
+}
+
+static uint32_t ahash_of(const int32_t *v) {
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < ATTR_N; i++) h = (h ^ (uint32_t) v[i]) * 16777619u;
+    return h;
+}
+static uint16_t aset_intern(const int32_t *v) {
+    bool any = false;
+    for (int i = 0; i < ATTR_N; i++) if (v[i]) any = true;
+    if (!any) return 0;
+    if ((uint32_t) (nasets + 1) * 2 > ahcap) {
+        ahcap = ahcap ? ahcap * 2 : 1024;
+        free(ahash); ahash = xcalloc(ahcap, sizeof(uint16_t));
+        for (int id = 1; id < nasets; id++) {
+            uint32_t h = ahash_of(asets[id]) & (ahcap - 1);
+            while (ahash[h]) h = (h + 1) & (ahcap - 1);
+            ahash[h] = id;
+        }
+    }
+    uint32_t h = ahash_of(v) & (ahcap - 1);
+    while (ahash[h]) {
+        if (!memcmp(asets[ahash[h]], v, sizeof(int32_t) * ATTR_N)) return ahash[h];
+        h = (h + 1) & (ahcap - 1);
+    }
+    if (nasets > ATTR_MAX) { aoverflow++; return 0; }
+    if (nasets == capasets) { capasets = capasets ? capasets * 2 : 256; asets = xrealloc(asets, sizeof *asets * capasets); }
+    memcpy(asets[nasets], v, sizeof(int32_t) * ATTR_N);
+    ahash[h] = nasets;
+    return nasets++;
+}
+uint16_t rtx_attr_now(void) {
+    int32_t v[ATTR_N], saved = cur_ptr;
+    for (int i = 0; i < ATTR_N; i++) {
+        find_sa_element(INT_VAL, ATTR_FIRST + i, false);
+        v[i] = cur_ptr == TEX_NULL ? 0 : mem[cur_ptr + 2].b32.s1;
+        if (v[i] < 0) v[i] = 0;
+    }
+    cur_ptr = saved;
+    rtx_attr_dirty = false;
+    return rtx_attr_cur = aset_intern(v);
+}
+static void attrs_reset(void) {
+    free(rtx_ab); rtx_ab = NULL;
+    free(ahash); ahash = NULL; ahcap = 0;
+    free(asets); asets = NULL; capasets = 0;
+    for (int i = 0; i < nwattrs; i++) free(wattrs[i].a);
+    free(wattrs); wattrs = NULL; nwattrs = capwattrs = 0;
+    rmap_free(&wattr_map);
+    aoverflow = 0; rtx_attr_cur = 0; rtx_attr_dirty = true;
+    if (rtx_capture_flags & RTX_ATTRS) {
+        int32_t zero[ATTR_N] = { 0 };
+        capasets = 256; asets = xmalloc(sizeof *asets * capasets);
+        memcpy(asets[0], zero, sizeof zero); nasets = 1;
+    }
+}
+static wattr *unit_attrs(int32_t node) {
+    int64_t v;
+    if (!(rtx_ab[node] & 0x8000) || !rmap_get(&wattr_map, node, &v)) return NULL;
+    return wattrs[v].n == NATIVE_NODE_length(node) ? &wattrs[v] : NULL;
+}
+static uint16_t unit_attr(int32_t node, int i) {
+    wattr *w = unit_attrs(node);
+    return w && i < w->n ? w->a[i] : rtx_ab[node] & ATTR_MAX;
+}
+/* a native word's ids per character: one id when they agree */
+static void set_unit_attrs(int32_t node, const uint16_t *a, int n) {
+    bool one = true;
+    for (int i = 1; i < n; i++) if (a[i] != a[0]) one = false;
+    if (one) { rtx_ab[node] = n ? a[0] : 0; return; }
+    if (nwattrs == capwattrs) { capwattrs = capwattrs ? capwattrs * 2 : 256; wattrs = xrealloc(wattrs, sizeof(wattr) * capwattrs); }
+    wattrs[nwattrs].a = xmalloc(sizeof(uint16_t) * n);
+    memcpy(wattrs[nwattrs].a, a, sizeof(uint16_t) * n);
+    wattrs[nwattrs].n = n;
+    rmap_put(&wattr_map, node, nwattrs++);
+    rtx_ab[node] = 0x8000 | a[0];
+}
+/* copy_node_list, hpack's joined words: the copy keeps the original's */
+void rtx_attr_copy(int32_t from, int32_t to) {
+    wattr *w = rtx_ab[from] & 0x8000 ? unit_attrs(from) : NULL;
+    if (w) set_unit_attrs(to, w->a, w->n);
+    else rtx_ab[to] = rtx_ab[from] & ATTR_MAX;
+    /* and what the capture knows of it: an interword space stays one when
+     * \usebox copies it (the flag is on whenever the editor captures) */
+    if (rtx_nb) rtx_nb[to] |= rtx_nb[from] & (RTX_NB_SPACE | RTX_NB_ITALIC);
+}
+/* the words from `start` on, the first `pre` characters of which were the
+ * word XeTeX's main loop merged this run into (its ids in old) */
+static void attrs_after_merge(int32_t start, const uint16_t *old, int pre, uint16_t now) {
+    int total = 0, k = 0;
+    for (int32_t p = start; p != TEX_NULL; p = LLIST_link(p)) if (is_word_node(p)) total += NATIVE_NODE_length(p);
+    uint16_t *all = xmalloc(sizeof(uint16_t) * (total + 1));
+    for (int i = 0; i < total; i++) all[i] = i < pre ? old[i] : now;
+    for (int32_t p = start; p != TEX_NULL; p = LLIST_link(p)) if (is_word_node(p)) {
+        set_unit_attrs(p, all + k, NATIVE_NODE_length(p));
+        k += NATIVE_NODE_length(p);
+    }
+    free(all);
+}
+/* mlist_to_hlist: what a noad became gets the noad's tuple, as LuaTeX's
+ * glyphs get their noad's attributes (made now, they carry the tuple in
+ * force where the formula ends); nested noads have set theirs already */
+static void noad_list(int32_t p, uint16_t from, uint16_t to) {
+    for (; p != TEX_NULL; p = LLIST_link(p)) {
+        if ((rtx_ab[p] & ATTR_MAX) == from && !(rtx_ab[p] & 0x8000)) rtx_ab[p] = to;
+        if (!is_char_node(p) && (NODE_type(p) == HLIST_NODE || NODE_type(p) == VLIST_NODE)) noad_list(BOX_list_ptr(p), from, to);
+    }
+}
+void rtx_noad_attrs(int32_t q) {
+    uint16_t now = rtx_attr_dirty ? rtx_attr_now() : rtx_attr_cur, a = rtx_ab[q] & ATTR_MAX;
+    if (a != now) noad_list(mem[q + 1].b32.s1, now, a);
+}
+static void jaset(uint16_t id) {
+    jopen('[');
+    for (int i = 0; i < ATTR_N; i++) if (asets[id][i]) { jnum(909 + i); jnum(asets[id][i]); }
+    jclose(']');
+}
+/* "a": the attributes set on the node as pairs [909, value, …] (values > 0);
+ * "au": a mixed word's, as runs [[chars, pairs], …] */
+static void jattrs(int32_t p) {
+    uint16_t v = rtx_ab[p];
+    wattr *w = v & 0x8000 ? unit_attrs(p) : NULL;
+    if (!w) { if (v & ATTR_MAX) { jkey("a"); jaset(v & ATTR_MAX); } return; }
+    jkey("au"); jopen('[');
+    for (int i = 0; i < w->n; ) {
+        int n = 1;
+        while (i + n < w->n && w->a[i + n] == w->a[i]) n++;
+        jopen('['); jnum(n); jaset(w->a[i]); jclose(']');
+        i += n;
+    }
+    jclose(']');
+}
+
 /* ── native words: per character, through mapping and merging ── */
 static uint64_t *npos = NULL;              /* parallel to native_text while collecting */
 static int npos_cap = 0;
@@ -638,6 +798,9 @@ static int32_t saved_tail = TEX_NULL, saved_prev = TEX_NULL;
 static uint64_t *old_pos = NULL;
 static int old_n = 0;
 static bool collecting = false;
+static uint16_t *old_ua = NULL;           /* RTX_ATTRS: that word's ids, per character */
+static int old_un = 0;
+static uint16_t run_aid = 0;
 
 void rtx_native_char(void) {
     uint64_t p = 0;
@@ -656,6 +819,8 @@ void rtx_native_collected(void) {
     saved_tail = cur_list.tail;
     saved_prev = TEX_NULL;
     old_n = 0;
+    old_un = 0;
+    run_aid = rtx_ab ? (rtx_attr_dirty ? rtx_attr_now() : rtx_attr_cur) : 0;
     /* XeTeX may merge this word into the native word before it (same font,
      * nothing but the word between): remember that word and its positions */
     int32_t t = saved_tail;
@@ -664,6 +829,11 @@ void rtx_native_collected(void) {
         wpos *w = get_word_pos(t);
         if (w) { old_pos = xrealloc(old_pos, 8 * (w->n + 1)); memcpy(old_pos, w->pos, 8 * w->n); old_n = w->n; }
         else { old_pos = xrealloc(old_pos, 8 * (NATIVE_NODE_length(t) + 1)); memset(old_pos, 0, 8 * NATIVE_NODE_length(t)); old_n = NATIVE_NODE_length(t); }
+        if (rtx_ab) {
+            old_un = NATIVE_NODE_length(t);
+            old_ua = xrealloc(old_ua, sizeof(uint16_t) * (old_un + 1));
+            for (int i = 0; i < old_un; i++) old_ua[i] = unit_attr(t, i);
+        }
         int32_t q = cur_list.head;
         while (q != TEX_NULL && LLIST_link(q) != t) q = LLIST_link(q);
         saved_prev = q;
@@ -684,6 +854,7 @@ void rtx_native_done(void) {
     rtx_pb[saved_tail] &= ~2;
     int32_t start = merged ? (saved_prev == TEX_NULL ? TEX_NULL : LLIST_link(saved_prev)) : LLIST_link(saved_tail);
     if (start == TEX_NULL) return;
+    if (rtx_ab && merged && old_un > 0) attrs_after_merge(start, old_ua, old_un, run_aid);
     /* the text of the words made from this run */
     int total = 0;
     for (int32_t p = start; p != TEX_NULL; p = LLIST_link(p)) if (is_word(p)) total += NATIVE_NODE_length(p);
@@ -733,6 +904,14 @@ void rtx_merge_words(int32_t merged, int32_t chain) {
     }
     if (any) set_word_pos(merged, all, n);
     free(all);
+    if (rtx_ab) {
+        uint16_t *ua = xmalloc(sizeof(uint16_t) * (n + 1));
+        k = 0;
+        for (int32_t p = chain; p != TEX_NULL && k < n; p = LLIST_link(p))
+            if (is_word(p)) for (int i = 0; i < NATIVE_NODE_length(p) && k < n; i++, k++) ua[k] = unit_attr(p, i);
+        set_unit_attrs(merged, ua, k);
+        free(ua);
+    }
 }
 
 /* JSON: a native word's positions as runs of units at consecutive columns:
@@ -1036,6 +1215,7 @@ static void ser_node(int32_t p, int mode, hyctx *hy) {
         jint("c", CHAR_NODE_character(p));
         note_glyph(CHAR_NODE_font(p), CHAR_NODE_character(p));
         if (rtx_pb) jnode_src(p);
+        if (rtx_ab) jattrs(p);
         jclose('}');
         return;
     }
@@ -1170,6 +1350,7 @@ static void ser_node(int32_t p, int mode, hyctx *hy) {
     default:
         jcstr("t", "?"); jint("type", NODE_type(p));
     }
+    if (rtx_ab) jattrs(p);
     jclose('}');
 }
 
@@ -1942,6 +2123,7 @@ void rtx_finish(void) {
     jint("displays", disp_count);
     { int32_t *tw = dimen_register("textwidth"); if (tw) jint("textwidth", *tw); }
     jint("hsize", DIMENPAR(hsize));
+    if (rtx_ab) { jint("asets", nasets - 1); if (aoverflow) jint("aoverflow", aoverflow); }
     rec_end();
     flush_out();
     if (out_h) ttstub_output_close(out_h);

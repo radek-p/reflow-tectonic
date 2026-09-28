@@ -187,6 +187,7 @@ int32_t get_avail(void)
     }
     mem[p].b32.s1 = TEX_NULL;
     RTX_FREE(p);   /* a reused word keeps no mark */
+    RTX_STAMP(p);
     return p;
 }
 
@@ -279,6 +280,7 @@ found:
         mem[r + s - 1].b32.s0 = cur_input.synctex_tag;
         mem[r + s - 1].b32.s1 = line;
     }
+    RTX_STAMP_N(r, s);
     return r;
 }
 
@@ -1633,6 +1635,7 @@ copy_node_list(int32_t p)
             mem[r + words] = mem[p + words];
         }
 
+        RTX_ACOPY(p, r);
         mem[q].b32.s1 = r;
         q = r;
         p = LLIST_link(p);
@@ -4267,6 +4270,7 @@ void sa_w_def(int32_t p, int32_t w)
         mem[p].b16.s0 = cur_level;
         mem[p + 2].b32.s1 = w;
     }
+    RTX_ADIRTY();   /* after the store: sa_save may allocate (and stamp) */
     delete_sa_ref(p);
 }
 
@@ -4286,6 +4290,7 @@ void gsa_w_def(int32_t p, int32_t w)
     mem[p + 1].b32.s0++;
     mem[p].b16.s0 = LEVEL_ONE;
     mem[p + 2].b32.s1 = w;
+    RTX_ADIRTY();
     delete_sa_ref(p);
 }
 
@@ -4321,6 +4326,7 @@ void sa_restore(void)
         else
             free_node(p, POINTER_NODE_SIZE);
     } while (!(sa_chain == TEX_NULL));
+    RTX_ADIRTY();
 }
 
 void new_save_level(group_code c)
@@ -12323,6 +12329,7 @@ int32_t hpack(int32_t p, scaled_t w, small_number m)
                                     }
                                     ppp = LLIST_link(ppp);
                                 } while (!((ppp == TEX_NULL)));
+                                RTX_ACOPY(p, pp);
                                 RTX_SRC(rtx_merge_words(pp, p));
                                 flush_node_list(p);
                                 p = mem[q].b32.s1;
@@ -16910,6 +16917,7 @@ handle_right_brace(void)
                         if (mem[p + 2].b32.s1 == EMPTY) {
                             mem[save_stack[save_ptr + 0].b32.s1].b32 = mem[p + 1].b32;
                             RTX_SRC(rtx_copypos(p + 1, save_stack[save_ptr + 0].b32.s1));
+                            RTX_ACOPY(p, save_stack[save_ptr + 0].b32.s1);   /* the folded group's tuple */
                             free_node(p, NOAD_SIZE);
                         }
                     }
@@ -18026,6 +18034,7 @@ collected:
     }
 
     mem[lig_stack].b16.s1 = main_f;
+    RTX_STAMP(lig_stack);
     cur_l = cur_chr;
     mem[lig_stack].b16.s0 = cur_l;
     cur_q = cur_list.tail;
@@ -18201,6 +18210,7 @@ main_loop_lookahead_1:
     }
 
     mem[lig_stack].b16.s1 = main_f;
+    RTX_STAMP(lig_stack);
     cur_r = cur_chr;
     mem[lig_stack].b16.s0 = cur_r;
 

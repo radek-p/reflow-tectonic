@@ -1653,6 +1653,7 @@ clean_box(int32_t p, small_number s)
             cur_mlist = new_noad();
             mem[cur_mlist + 1] = mem[p];
             RTX_SRC(rtx_copypos(p, cur_mlist + 1));
+            RTX_ACOPY(p, cur_mlist);   /* the field's tuple */
         }
         break;
     case 2:
@@ -3181,6 +3182,7 @@ mlist_to_hlist(void)
         free_node(z, BOX_NODE_SIZE);
  lab80:                        /*done_with_noad */ r = q;
         RTX_SRC(rtx_noad_done(q));
+        if (NODE_type(q) != LEFT_NOAD && NODE_type(q) != RIGHT_NOAD) RTX_NOAD(q);
         r_type = mem[r].b16.s1;
         if (r_type == RIGHT_NOAD) {
             r_type = LEFT_NOAD;
@@ -3252,6 +3254,7 @@ mlist_to_hlist(void)
         case RIGHT_NOAD:
             t = make_left_right(q, style, max_d, max_h);
             RTX_SRC(rtx_lr_done(q));
+            RTX_NOAD(q);
             break;
         case STYLE_NODE:
             {

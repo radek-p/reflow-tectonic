@@ -17,6 +17,25 @@
 #define RTX_MATHLISTS 4  /* noads before mlist_to_hlist */
 #define RTX_SAMPLES   8  /* displays re-typeset at other widths (fork) */
 #define RTX_SRCPOS   16  /* source positions of characters (file, line, column) */
+#define RTX_ATTRS    32  /* nodes stamped with \attribute909-917 (\count32000-32008) */
+
+/* Attributes (RTX_ATTRS). LuaTeX's \attributeN is a count register whose
+ * value every new node keeps; rtx-xetex.sty makes \attributeN \count(31091+N)
+ * and each node gets the id of the tuple (\count32000..\count32008) in force when it
+ * is allocated, in a side table (0: none set). Bit 15: a native word whose
+ * characters came from runs with different tuples (a table per character). */
+extern uint16_t *rtx_ab;         /* a tuple id per mem word; NULL when off */
+extern bool rtx_attr_dirty;      /* a sparse count may have changed */
+extern uint16_t rtx_attr_cur;
+uint16_t rtx_attr_now(void);
+void rtx_attr_copy(int32_t from, int32_t to);
+void rtx_noad_attrs(int32_t q);
+#define RTX_NOAD(q) do { if (rtx_ab) rtx_noad_attrs(q); } while (0)
+#define RTX_STAMP(p) do { if (rtx_ab) rtx_ab[p] = rtx_attr_dirty ? rtx_attr_now() : rtx_attr_cur; } while (0)
+/* every word of a node: a noad's fields keep the tuple they were made with */
+#define RTX_STAMP_N(p, s) do { if (rtx_ab) { uint16_t a_ = rtx_attr_dirty ? rtx_attr_now() : rtx_attr_cur; for (int32_t i_ = 0; i_ < (s); i_++) rtx_ab[(p) + i_] = a_; } } while (0)
+#define RTX_ACOPY(f, t) do { if (rtx_ab) rtx_attr_copy(f, t); } while (0)
+#define RTX_ADIRTY() do { if (rtx_ab) rtx_attr_dirty = true; } while (0)
 
 extern int rtx_capture_flags;
 extern unsigned char *rtx_nb;     /* one byte per mem word; NULL when off */

@@ -529,11 +529,24 @@ static bool tok_pos(uint64_t *pos) {
     return false;
 }
 
+/* An 8-bit (TFM) font's character node, made by the main loop from the token just read (or a
+ * \char): its position, as a native word's characters get theirs (rtx_native_char). Without it,
+ * text in T1/OT1 fonts (fontenc, lmodern: most papers from pdfLaTeX) had no positions at all. */
+void rtx_char_node(int32_t p) {
+    uint64_t pos = 0;
+    bool known = false;
+    if (!take_char_num(&pos, &known)) known = tok_pos(&pos);
+    if (known) setpos(p, pos, mem[p].b32.s0);
+    else rtx_pb[p] &= ~PB_POS;
+}
+
 /* only a token's own position is kept with it: a macro call site ("via")
  * depends on where the token is used, and is found then */
 void rtx_tokpos(int32_t q) {
     uint64_t p;
     if (tok_pos(&p) && !(p & POS_VIA)) setpos(q, p, mem[q].b32.s0);
+    else rtx_pb[q] &= ~PB_POS;      /* (hardening) a word from the free list keeps no stale position: the check
+                                       word does not tell one letter token from the same letter elsewhere */
 }
 
 /* A delimited argument's partial match of its delimiter failed (TeX §397): TeX
@@ -1269,6 +1282,12 @@ static void ser_node(int32_t p, int mode, hyctx *hy) {
         jkey("o"); jopen('[');
         for (int32_t q = LIGATURE_NODE_lig_ptr(p); q != TEX_NULL; q = LLIST_link(q)) jnum(CHAR_NODE_character(q));
         jclose(']');
+        /* its source: where its first original character came from (the converter gives it the
+         * length of all of them: a ligature's characters are consecutive in the input) */
+        if (rtx_pb && LIGATURE_NODE_lig_ptr(p) != TEX_NULL) {
+            uint64_t pos;
+            if (getpos(LIGATURE_NODE_lig_ptr(p), &pos)) jpos("src", pos);
+        }
         break;
     }
     case DISC_NODE:

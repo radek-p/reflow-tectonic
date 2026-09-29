@@ -59,6 +59,8 @@ extern int32_t rtx_tok_node, rtx_tok_col, rtx_tok_line, rtx_tok_tag;
 /* this token node (a macro argument, a backed-up token) is the token just read */
 #define RTX_TOKPOS(q) do { if (rtx_pb) rtx_tokpos(q); } while (0)
 #define RTX_SRC(call) do { if (rtx_pb) call; } while (0)
+/* a word taken from the free list inline (not through get_avail): its old position is not its own */
+#define RTX_NOPOS(p) do { if (rtx_pb) rtx_pb[p] &= ~1; } while (0)
 void rtx_tokpos(int32_t q);
 void rtx_fieldpos(int32_t field);
 void rtx_copypos(int32_t from, int32_t to);
@@ -67,6 +69,7 @@ void rtx_macro_enter(void);
 void rtx_macro_push(void);
 void rtx_list_push(void);
 void rtx_char_num(void);
+void rtx_char_node(int32_t p);
 void rtx_partial_begin(int32_t s, int32_t r);
 void rtx_partial_copy(int32_t q);
 void rtx_native_char(void);

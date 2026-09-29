@@ -9202,6 +9202,7 @@ str_toks_cat(pool_pointer b, small_number cat)
 
         LLIST_link(p) = q;
         LLIST_info(q) = t;
+        RTX_NOPOS(q);   /* taken from the free list without get_avail: no stale position */
         p = q;
         k++;
     }
@@ -18037,6 +18038,7 @@ collected:
     RTX_STAMP(lig_stack);
     cur_l = cur_chr;
     mem[lig_stack].b16.s0 = cur_l;
+    RTX_SRC(rtx_char_node(lig_stack));
     cur_q = cur_list.tail;
 
     if (cancel_boundary) {
@@ -18138,6 +18140,7 @@ main_loop_lookahead: /*1073: */
         goto main_loop_lookahead_1;
 
     if (cur_cmd == CHAR_NUM) {
+        RTX_SRC(rtx_char_num());
         scan_char_num();
         cur_chr = cur_val;
         goto main_loop_lookahead_1;
@@ -18213,6 +18216,7 @@ main_loop_lookahead_1:
     RTX_STAMP(lig_stack);
     cur_r = cur_chr;
     mem[lig_stack].b16.s0 = cur_r;
+    RTX_SRC(rtx_char_node(lig_stack));
 
     if (cur_r == false_bchar)
         cur_r = TOO_BIG_CHAR; /*:1073 */

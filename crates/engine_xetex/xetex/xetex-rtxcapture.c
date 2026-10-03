@@ -453,7 +453,12 @@ static bool macro_cs_known = false;
 static unsigned char *user_tags = NULL;
 static int n_user_tags = 0;
 
+static uint64_t ended_call;           /* a peek after a call (rtx_list_end) */
+static int ended_tag, ended_line, ended_col;
+static bool ended_known = false;
+
 static void srcpos_reset(void) {
+    ended_known = false;
     if (user_tags) memset(user_tags, 0, n_user_tags);
     free(rtx_pb); rtx_pb = NULL;
     free(posm.k); free(posm.v); free(posm.c); memset(&posm, 0, sizeof posm);
@@ -679,6 +684,33 @@ static bool tok_own_pos(int32_t t, uint64_t *pos) {
     return false;
 }
 
+/* A peek after a call: a macro's last tokens read the next token from the file
+ * (\futurelet in \@ifnextchar, \@ifstar, xparse's optional arguments) and back it
+ * up. By then the call's token lists have ended (get_next ends a used-up list
+ * before it reads below), so nothing on the input stack says which call is still
+ * going on: what the backed-up token leads to (\sqrt's \sqrtsign, a starred
+ * form's body) was placed at the peeked character. The call is remembered when
+ * its outermost list ends, and the next token read from the file after it (on
+ * the same line, only blanks between) that is backed up belongs to it. */
+void rtx_list_end(void) {
+    if (input_ptr < 1 || input_stack[input_ptr - 1].state == TOKEN_LIST) return;    /* not the outermost list */
+    ended_known = input_ptr < norigins && origins[input_ptr].set && origins[input_ptr].start == cur_input.start;
+    if (ended_known) {
+        input_state_t *f = &input_stack[input_ptr - 1];
+        ended_call = origins[input_ptr].pos;
+        ended_tag = f->synctex_tag; ended_line = line; ended_col = f->loc - f->start;
+    }
+}
+
+/* the token just read from the file is the first after the ended call: on its
+ * line, nothing but blanks between (TeX skips a space after a control word) */
+static bool first_after_end(void) {
+    if (rtx_tok_tag != ended_tag || rtx_tok_line != ended_line || rtx_tok_col < ended_col) return false;
+    for (int c = ended_col; c < rtx_tok_col; c++)
+        if (CAT_CODE(buffer[cur_input.start + c]) != SPACER) return false;
+    return true;
+}
+
 static uint64_t back_pos, back_org;
 static bool back_known = false, back_org_known = false;
 void rtx_back_begin(void) {
@@ -687,7 +719,10 @@ void rtx_back_begin(void) {
     /* and the call it is read for: the level's origin, never "exact" – the
      * token's own position is not the cause of what is made after it (a
      * peeked `{` of \sqrt{y} is not where \sqrt's sign comes from) */
-    back_org_known = via_origin(&back_org);
+    if (cur_input.state != TOKEN_LIST && rtx_tok_node == TEX_NULL && ended_known && first_after_end()) {
+        back_org = ended_call;          /* a peek after a call: the call's (above) */
+        back_org_known = true;
+    } else back_org_known = via_origin(&back_org);
 }
 /* the backed-up token keeps its own position (a via one is found where it is used) */
 void rtx_back_tok(int32_t q) { if (back_known && !(back_pos & POS_VIA)) setpos(q, back_pos, mem[q].b32.s0); }

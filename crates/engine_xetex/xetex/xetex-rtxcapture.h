@@ -53,6 +53,7 @@ extern int rtx_fork_pending;      /* a display asks for width samples */
  * came from: a column of the current file line, or a token-list node. */
 extern unsigned char *rtx_pb;    /* a position byte per mem word; NULL when off */
 extern int32_t rtx_tok_node, rtx_tok_col, rtx_tok_line, rtx_tok_tag;
+void rtx_list_end(void);
 /* the tokens read before it, newest last (a token backed up or stored can be one
  * read a little earlier: \futurelet's second, \expandafter's first) */
 #define RTX_RING 8

@@ -4961,6 +4961,7 @@ void end_token_list(void)
         else
             fatal_error("(interwoven alignment preambles are not allowed)");
     }
+    RTX_SRC(rtx_list_end());
     {
         input_ptr--;
         cur_input = input_stack[input_ptr];

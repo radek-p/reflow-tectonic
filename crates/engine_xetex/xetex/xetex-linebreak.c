@@ -565,6 +565,7 @@ line_break(bool d)
                                     hb = s;
                                     hn++;
                                     hu[hn] = c;
+                                    RTX_SRC(rtx_hu_from(hn, s));
                                     hc[hn] = hc[0];
                                     hyf_bchar = TOO_BIG_CHAR;
                                 } else if (NODE_type(s) == LIGATURE_NODE) {
@@ -598,6 +599,7 @@ line_break(bool d)
 
                                         j++;
                                         hu[j] = c;
+                                        RTX_SRC(rtx_hu_from(j, q));
                                         hc[j] = hc[0];
                                         q = LLIST_link(q);
                                     }
@@ -2296,6 +2298,7 @@ found1:
                         i++;
                         c = hu[i];
                         hu[i] = hyf_char;
+                        RTX_SRC(rtx_hu_hyph(i));
                         {
                             mem[hyf_node].b32.s1 = avail;
                             avail = hyf_node;
@@ -2316,6 +2319,7 @@ found1:
                     }
                     if (hyf_node != TEX_NULL) {
                         hu[i] = c;
+                        RTX_SRC(rtx_hu_hyph(-1));
                         l = i;
                         i--;
                     }
@@ -2430,6 +2434,7 @@ reconstitute(small_number j, small_number n, int32_t bchar, int32_t hchar)
                 t = LLIST_link(t);
                 mem[t].b16.s1 = hf;
                 mem[t].b16.s0 = mem[p].b16.s0;
+                RTX_SRC(rtx_char_copy(p, t));
             }
             p = LLIST_link(p);
         }
@@ -2438,6 +2443,7 @@ reconstitute(small_number j, small_number n, int32_t bchar, int32_t hchar)
         t = LLIST_link(t);
         mem[t].b16.s1 = hf;
         mem[t].b16.s0 = cur_l;
+        RTX_SRC(rtx_hu_char(t, j));
     }
     lig_stack = TEX_NULL;
     {
@@ -2526,6 +2532,7 @@ continue_:
                                         mem[lig_stack + 1].b32.s1 = p;
                                         mem[p].b16.s0 = hu[j + 1];
                                         mem[p].b16.s1 = hf;
+                                        RTX_SRC(rtx_hu_char(p, j + 1));
                                     }
                                 }
                             }
@@ -2598,6 +2605,7 @@ continue_:
                                         mem[t].b16.s0 = cur_r;
                                     }
                                     j++;
+                                    RTX_SRC(rtx_hu_char(t, j));
                                     {
                                         if (j < n)
                                             cur_r = hu[j + 1];

@@ -331,7 +331,7 @@ void rtx_input_opened(void) {
 /* Where each typeset character came from: the file (synctex tag), line and
  * column of its token – or, for a character a macro produced, where the
  * outermost macro was called in a file ("via"). A position is packed into
- * 64 bits: tag 20 | line 24 | column 16 | via 1.
+ * 64 bits: tag 16 | line 20 | column 16 | span 11 | via 1.
  *
  * Tokens carry no positions in TeX. What the capture keeps:
  *  - get_next notes the token it returns: a column of a file line, or the
@@ -354,19 +354,27 @@ int32_t rtx_tok_node = TEX_NULL, rtx_tok_col = 0, rtx_tok_line = 0, rtx_tok_tag 
 #define PB_POS 1
 #define POS_VIA 1ull
 static uint64_t mkpos(int tag, int line, int col, bool via) {
-    if (tag < 0) tag = 0;
-    if (line < 0) line = 0;
+    if (tag < 0 || tag > 0xFFFF) tag = 0;     /* beyond 16 bits: not known (no file, rather than another) */
+    if (line < 0 || line > 0xFFFFF) line = 0;
     if (col < 0) col = 0;
     if (col > 0xFFFF) col = 0xFFFF;
-    return ((uint64_t) (tag & 0xFFFFF) << 44) | ((uint64_t) (line & 0xFFFFFF) << 20) | ((uint64_t) col << 4) | (via ? POS_VIA : 0);
+    return ((uint64_t) (tag & 0xFFFF) << 48) | ((uint64_t) (line & 0xFFFFF) << 28) | ((uint64_t) col << 12) | (via ? POS_VIA : 0);
 }
-#define POS_TAG(p) ((int) ((p) >> 44))
-#define POS_LINE(p) ((int) (((p) >> 20) & 0xFFFFFF))
-#define POS_COL(p) ((int) (((p) >> 4) & 0xFFFF))
+#define POS_TAG(p) ((int) ((p) >> 48))
+#define POS_LINE(p) ((int) (((p) >> 28) & 0xFFFFF))
+#define POS_COL(p) ((int) (((p) >> 12) & 0xFFFF))
 #define POS_VIA_OF(p) ((int) ((p) & 1))
-/* bits 1-3: how many source characters a unit stands for, when the font's
- * mapping made one of several (`` → “, --- → —); 0 = one */
-#define POS_SPAN(p) ((int) (((p) >> 1) & 7))
+/* bits 1-11, the span: for a native word's unit, how many source characters
+ * it stands for when the font's mapping made one of several (`` → “,
+ * --- → —); for a via position, the extent of the macro call (\name and the
+ * arguments read from that line); 0 = one, or not known */
+#define POS_SPAN_MAX 0x7FF
+#define POS_SPAN(p) ((int) (((p) >> 1) & POS_SPAN_MAX))
+#define POS_BASE(p) ((p) & ~((uint64_t) POS_SPAN_MAX << 1))
+static uint64_t with_span(uint64_t p, int n) {
+    if (n < 0 || n > POS_SPAN_MAX) n = 0;      /* longer than a span can say: not known */
+    return POS_BASE(p) | ((uint64_t) n << 1);
+}
 
 /* positions by mem address, with the word's content for token nodes (a
  * token node can be reused by an inline allocation that bypasses get_avail) */
@@ -461,9 +469,12 @@ static input_state_t *level(int k) { return k == input_ptr ? &cur_input : &input
 
 static bool user_tag(int tag);
 
-/* the outermost macro called from a file, on the input stack now */
+/* the outermost macro called from a file, on the input stack now; its span
+ * the widest extent the levels made by that call know (an inner macro of
+ * the call that read more arguments from the line knows more) */
 static bool via_origin(uint64_t *pos) {
     bool found = false;
+    int at = -1;
     for (int k = input_ptr; k >= 0; k--) {
         input_state_t *l = level(k);
         if (l->state != TOKEN_LIST) {
@@ -475,9 +486,16 @@ static bool via_origin(uint64_t *pos) {
             break;
         }
         if (k < norigins && origins[k].set && origins[k].start == l->start) {
-            *pos = origins[k].pos; found = true;
-            if (origins[k].exact) return true;      /* the innermost call whose own token has a position */
+            *pos = origins[k].pos; found = true; at = k;
+            if (origins[k].exact) break;      /* the innermost call whose own token has a position */
         }
+    }
+    if (at >= 0) {
+        int span = POS_SPAN(*pos);
+        for (int k = input_ptr; k >= at; k--)
+            if (k < norigins && origins[k].set && origins[k].start == level(k)->start
+                && POS_BASE(origins[k].pos) == POS_BASE(*pos) && POS_SPAN(origins[k].pos) > span) span = POS_SPAN(origins[k].pos);
+        *pos = with_span(*pos, span);
     }
     return found;
 }
@@ -519,7 +537,7 @@ static bool take_char_num(uint64_t *pos, bool *known) {
 /* the position of the token get_next returned last */
 static bool tok_pos(uint64_t *pos) {
     if (rtx_tok_node == TEX_NULL) {
-        if (rtx_tok_tag <= 0) return false;
+        if (rtx_tok_tag <= 0 || rtx_tok_tag > 0xFFFF) return false;
         if (!user_tag(rtx_tok_tag)) return false;
         *pos = mkpos(rtx_tok_tag, rtx_tok_line, rtx_tok_col, false);
         return true;
@@ -529,24 +547,13 @@ static bool tok_pos(uint64_t *pos) {
     return false;
 }
 
-/* An 8-bit (TFM) font's character node, made by the main loop from the token just read (or a
- * \char): its position, as a native word's characters get theirs (rtx_native_char). Without it,
- * text in T1/OT1 fonts (fontenc, lmodern: most papers from pdfLaTeX) had no positions at all. */
-void rtx_char_node(int32_t p) {
-    uint64_t pos = 0;
-    bool known = false;
-    if (!take_char_num(&pos, &known)) known = tok_pos(&pos);
-    if (known) setpos(p, pos, mem[p].b32.s0);
-    else rtx_pb[p] &= ~PB_POS;
-}
-
 /* only a token's own position is kept with it: a macro call site ("via")
  * depends on where the token is used, and is found then */
+static bool tok_own_pos(int32_t t, uint64_t *pos);
 void rtx_tokpos(int32_t q) {
     uint64_t p;
-    if (tok_pos(&p) && !(p & POS_VIA)) setpos(q, p, mem[q].b32.s0);
-    else rtx_pb[q] &= ~PB_POS;      /* (hardening) a word from the free list keeps no stale position: the check
-                                       word does not tell one letter token from the same letter elsewhere */
+    if (tok_own_pos(mem[q].b32.s0, &p)) setpos(q, p, mem[q].b32.s0);
+    else rtx_pb[q] &= ~PB_POS;      /* a word from the free list keeps no stale position (hardening's 0006) */
 }
 
 /* A delimited argument's partial match of its delimiter failed (TeX §397): TeX
@@ -582,20 +589,113 @@ static void origins_fit(void) {
     }
 }
 
+/* the source characters of a token: a control sequence's backslash and name */
+static int tok_len(int32_t t) {
+    if (t < CS_TOKEN_FLAG) return 1;
+    int32_t p = t - CS_TOKEN_FLAG;
+    if (p < SINGLE_BASE) return 1;                     /* an active character */
+    if (p < NULL_CS) return 2;                         /* \x */
+    if (p >= HASH_BASE && (p < UNDEFINED_CONTROL_SEQUENCE || p > EQTB_SIZE) && p <= hash_top && hash[p].s1 > 0)
+        return 1 + length(hash[p].s1);              /* (e-TeX's extra hash is above eqtb) */
+    return 1;
+}
+
+/* How far base's line has been read: the column after the token read last,
+ * when that token is on base's line (from the file, or a token of an
+ * argument with its own position); else -1. A call's extent: \name and the
+ * arguments it has read so far. */
+static int read_end(uint64_t base) {
+    if (rtx_tok_node == TEX_NULL) {
+        if (rtx_tok_tag != POS_TAG(base) || rtx_tok_line != POS_LINE(base)) return -1;
+        for (int k = input_ptr; k >= 0; k--) {
+            input_state_t *l = level(k);
+            if (l->state != TOKEN_LIST) return l->synctex_tag == rtx_tok_tag ? l->loc - l->start : -1;
+        }
+        return -1;
+    }
+    uint64_t q;
+    if (!getpos(rtx_tok_node, &q) || POS_VIA_OF(q) || POS_TAG(q) != POS_TAG(base) || POS_LINE(q) != POS_LINE(base)) return -1;
+    return POS_COL(q) + tok_len(mem[rtx_tok_node].b32.s0);
+}
+static uint64_t extend(uint64_t pos) {
+    int span = read_end(pos) - POS_COL(pos);
+    return span > POS_SPAN(pos) ? with_span(pos, span) : pos;
+}
+
 /* any token list begins: what it produces is due to the token read last (a
  * \the, an \everypar's paragraph, a backed-up token) – unless a macro, below */
 void rtx_list_push(void) {
     origins_fit();
     origins[input_ptr].set = false;
     uint64_t p;
-    if (tok_pos(&p)) { origins[input_ptr].set = true; origins[input_ptr].pos = p | POS_VIA; origins[input_ptr].start = cur_input.start; origins[input_ptr].exact = !(p & POS_VIA); }
+    if (tok_pos(&p)) { origins[input_ptr].set = true; origins[input_ptr].pos = extend(p | POS_VIA); origins[input_ptr].start = cur_input.start; origins[input_ptr].exact = !(p & POS_VIA); }
 }
 
 void rtx_macro_push(void) {
     origins_fit();
     origins[input_ptr].set = macro_cs_known;
     origins[input_ptr].exact = macro_cs_known && !(macro_cs_pos & POS_VIA);
-    origins[input_ptr].pos = macro_cs_pos | POS_VIA;
+    origins[input_ptr].pos = macro_cs_known ? extend(macro_cs_pos | POS_VIA) : 0;
+    origins[input_ptr].start = cur_input.start;
+}
+
+/* back_input: TeX first ends the token lists that are used up – the macro
+ * that made the token, often (\csname…\endcsname backs up the name it made:
+ * a T1 accent's composite, \ss) – so the token's origin is taken before, and
+ * given to the level of the backed-up token after */
+/* The own position of token t, read last or a few tokens before (back_input
+ * often backs up another than the last: \futurelet's second, \expandafter's
+ * first): the newest of the tokens read that is t. A file token is checked
+ * against the line still in the buffer; one from an earlier line has none. */
+rtx_tokrec rtx_ring[RTX_RING];
+unsigned rtx_ring_i = 0;
+static bool rec_is(const rtx_tokrec *e, int32_t t, uint64_t *pos) {
+    if (e->node != TEX_NULL) {
+        if (e->node < 0 || e->node > MEM_TOP || mem[e->node].b32.s0 != t) return false;
+        if (!getpos(e->node, pos)) *pos = 0;
+        return true;
+    }
+    if (e->line != line || e->tag <= 0) return false;
+    for (int k = input_ptr; k >= 0; k--) {
+        input_state_t *l = level(k);
+        if (l->state == TOKEN_LIST) continue;
+        if (l->synctex_tag != e->tag || l->start + e->col > l->limit) return false;
+        UnicodeScalar c = buffer[l->start + e->col];
+        bool same;
+        if (t < CS_TOKEN_FLAG) same = t % MAX_CHAR_VAL == c;
+        else if (t - CS_TOKEN_FLAG < SINGLE_BASE) same = t - CS_TOKEN_FLAG - ACTIVE_BASE == c;   /* an active character */
+        else same = CAT_CODE(c) == ESCAPE;
+        if (!same) return false;
+        *pos = user_tag(e->tag) ? mkpos(e->tag, e->line, e->col, false) : 0;
+        return true;
+    }
+    return false;
+}
+static bool tok_own_pos(int32_t t, uint64_t *pos) {
+    rtx_tokrec cur = { rtx_tok_node, rtx_tok_col, rtx_tok_line, rtx_tok_tag };
+    if (rec_is(&cur, t, pos)) return *pos != 0;
+    for (unsigned k = 0; k < RTX_RING; k++)
+        if (rec_is(&rtx_ring[(rtx_ring_i - k) & (RTX_RING - 1)], t, pos)) return *pos != 0;
+    return false;
+}
+
+static uint64_t back_pos, back_org;
+static bool back_known = false, back_org_known = false;
+void rtx_back_begin(void) {
+    /* the token's own position (from the file, or its node's) */
+    back_known = tok_own_pos(cur_tok, &back_pos);
+    /* and the call it is read for: the level's origin, never "exact" – the
+     * token's own position is not the cause of what is made after it (a
+     * peeked `{` of \sqrt{y} is not where \sqrt's sign comes from) */
+    back_org_known = via_origin(&back_org);
+}
+/* the backed-up token keeps its own position (a via one is found where it is used) */
+void rtx_back_tok(int32_t q) { if (back_known && !(back_pos & POS_VIA)) setpos(q, back_pos, mem[q].b32.s0); }
+void rtx_back_push(void) {
+    origins_fit();
+    origins[input_ptr].set = back_org_known;
+    origins[input_ptr].exact = false;
+    origins[input_ptr].pos = back_org_known ? back_org | POS_VIA : 0;
     origins[input_ptr].start = cur_input.start;
 }
 
@@ -643,6 +743,12 @@ void rtx_noad_done(int32_t q) {
 void rtx_lr_done(int32_t q) {
     uint64_t pos;
     if (getpos(q + 1, &pos)) mark_list(mem[q + 1].b32.s1, pos);
+}
+/* a radical's sign, a math accent: made from the noad's delimiter or accent
+ * field (its command's position), before the noad's nucleus marks the rest */
+void rtx_mark_from(int32_t field, int32_t list) {
+    uint64_t pos;
+    if (list != TEX_NULL && getpos(field, &pos)) mark_list(list, pos);
 }
 
 /* ── attributes (RTX_ATTRS, patch 0005) ───────────────────────────────── */
@@ -891,7 +997,7 @@ void rtx_native_done(void) {
         int i2 = i + 1;
         if (j + 1 < mapped_n) while (i2 < raw_n && raw_txt[i2] != mt[j + 1]) i2++;
         else i2 = raw_n;
-        if (i < raw_n && i2 - i > 1 && !(all[pre + j] & POS_VIA)) all[pre + j] |= (uint64_t) ((i2 - i > 7 ? 7 : i2 - i) & 7) << 1;
+        if (i < raw_n && i2 - i > 1 && !(all[pre + j] & POS_VIA)) all[pre + j] = with_span(all[pre + j], i2 - i);
         i = i2 > i ? i2 : i + 1;
         j++;
     }
@@ -927,6 +1033,90 @@ void rtx_merge_words(int32_t merged, int32_t chain) {
     }
 }
 
+/* ── 8-bit (TFM) text: per character node ── */
+/* The main loop's character (lig_stack, made at main_loop and at its
+ * lookahead) is the token just read: its position goes on the node, which the
+ * lig/kern program then appends to the list or to a ligature's components
+ * (a ligature's position is its components', jlig_src). A word the line
+ * breaker hyphenates is rebuilt by reconstitute() from hu[]: the positions of
+ * the old nodes are kept by index (hu_pos) and handed to the new nodes. */
+#define PB_BREAK 4          /* a char node that is a discretionary's hyphen: a break point */
+static void rtx_tfm_set(int32_t p, bool known, uint64_t pos) {
+    rtx_pb[p] &= ~(PB_POS | PB_BREAK);     /* the node may be a reused word (avail, inline) */
+    if (known) setpos(p, pos, mem[p].b32.s0);
+}
+void rtx_tfm_char(int32_t p) {
+    uint64_t pos = 0;
+    bool known = false;
+    if (!take_char_num(&pos, &known)) known = tok_pos(&pos);
+    rtx_tfm_set(p, known, pos);
+}
+
+/* a character node made outside the main loop from the token just read
+ * (\accent's accent and accentee): a char node, or a native word of one
+ * character (new_character in a native font) */
+void rtx_made_char(int32_t p) {
+    uint64_t pos = 0;
+    bool known = false;
+    if (!take_char_num(&pos, &known)) known = tok_pos(&pos);
+    if (p == TEX_NULL) return;
+    if (is_char_node(p)) { rtx_tfm_set(p, known, pos); return; }
+    if (known && is_word_node(p)) {
+        int n = NATIVE_NODE_length(p);
+        uint64_t a[4] = { pos, pos, pos, pos };
+        if (n >= 1 && n <= 4) set_word_pos(p, a, n);
+    }
+}
+
+static uint64_t hu_pos[4097];
+static bool hu_has[4097];
+static int hu_hyph = -1;                   /* hu[hu_hyph] is the hyphen character for now */
+void rtx_hu_from(int i, int32_t node) {
+    if (i < 0 || i > 4096) return;
+    if (i == 1) hu_has[0] = false;         /* hu[0] comes from the node before the word (init_list), not by index */
+    hu_has[i] = getpos(node, &hu_pos[i]);
+}
+void rtx_hu_hyph(int i) { hu_hyph = i; }
+void rtx_hu_char(int32_t p, int i) {
+    rtx_pb[p] &= ~(PB_POS | PB_BREAK);
+    if (i < 0 || i > 4096 || !hu_has[i]) return;
+    setpos(p, hu_pos[i], mem[p].b32.s0);
+    if (i == hu_hyph) rtx_pb[p] |= PB_BREAK;  /* the hyphen of a break before hu[i]: placed at hu[i], length 0 */
+}
+void rtx_char_copy(int32_t from, int32_t to) {
+    uint64_t pos;
+    rtx_pb[to] &= ~(PB_POS | PB_BREAK);
+    if (getpos(from, &pos)) setpos(to, pos, mem[to].b32.s0);
+}
+
+/* JSON: a char node's position, [tag, line, col, via, length]; a ligature's:
+ * its first component's, and the length to the end of its last when they
+ * are on one line in order (ﬁ: 2; “ for ``: 2) */
+static void jchar_src(int32_t p) {
+    uint64_t pos;
+    if (!getpos(p, &pos)) return;
+    jkey("src"); jopen('['); jnum(POS_TAG(pos)); jnum(POS_LINE(pos)); jnum(POS_COL(pos)); jnum(POS_VIA_OF(pos));
+    jnum(POS_VIA_OF(pos) ? POS_SPAN(pos) : (rtx_pb[p] & PB_BREAK) ? 0 : 1);   /* via: the call's extent */
+    jclose(']');
+}
+static void jlig_src(int32_t lig) {
+    uint64_t a, b;
+    int32_t q = LIGATURE_NODE_lig_ptr(lig);
+    if (q == TEX_NULL || !getpos(q, &a)) return;
+    int len = POS_VIA_OF(a) ? POS_SPAN(a) : 1;
+    bool brk = (rtx_pb[q] & PB_BREAK) != 0;
+    if (!POS_VIA_OF(a)) {
+        int last = POS_COL(a);
+        for (int32_t r = LLIST_link(q); r != TEX_NULL; r = LLIST_link(r)) {
+            if (!getpos(r, &b) || POS_VIA_OF(b) || POS_TAG(b) != POS_TAG(a) || POS_LINE(b) != POS_LINE(a) || POS_COL(b) <= last) break;
+            if (rtx_pb[r] & PB_BREAK) continue;
+            last = POS_COL(b);
+        }
+        len = last - POS_COL(a) + 1;
+    }
+    jkey("src"); jopen('['); jnum(POS_TAG(a)); jnum(POS_LINE(a)); jnum(POS_COL(a)); jnum(POS_VIA_OF(a)); jnum(brk ? 0 : len); jclose(']');
+}
+
 /* JSON: a native word's positions as runs of units at consecutive columns:
  * [[n, tag, line, col, via], …] */
 static void jword_src(int32_t p) {
@@ -940,7 +1130,7 @@ static void jword_src(int32_t p) {
         while (i + n < w->n) {
             uint64_t b = w->pos[i + n];
             if (POS_TAG(b) != POS_TAG(a) || POS_LINE(b) != POS_LINE(a) || POS_VIA_OF(b) != POS_VIA_OF(a)) break;
-            if (POS_SPAN(a) || POS_SPAN(b)) break;
+            if ((POS_SPAN(a) || POS_SPAN(b)) && !(POS_VIA_OF(a) && POS_SPAN(a) == POS_SPAN(b))) break;   /* a via run: one call, one span */
             /* columns count code points; a low surrogate shares its pair's */
             int cp2 = cp + ((NATIVE_NODE_text(p)[i + n] & 0xFC00) == 0xDC00 ? 0 : 1);
             if (POS_COL(b) - POS_COL(a) != (POS_VIA_OF(a) ? 0 : cp2)) break;
@@ -1227,7 +1417,7 @@ static void ser_node(int32_t p, int mode, hyctx *hy) {
         jint("f", CHAR_NODE_font(p));
         jint("c", CHAR_NODE_character(p));
         note_glyph(CHAR_NODE_font(p), CHAR_NODE_character(p));
-        if (rtx_pb) jnode_src(p);
+        if (rtx_pb) jchar_src(p);
         if (rtx_ab) jattrs(p);
         jclose('}');
         return;
@@ -1282,12 +1472,7 @@ static void ser_node(int32_t p, int mode, hyctx *hy) {
         jkey("o"); jopen('[');
         for (int32_t q = LIGATURE_NODE_lig_ptr(p); q != TEX_NULL; q = LLIST_link(q)) jnum(CHAR_NODE_character(q));
         jclose(']');
-        /* its source: where its first original character came from (the converter gives it the
-         * length of all of them: a ligature's characters are consecutive in the input) */
-        if (rtx_pb && LIGATURE_NODE_lig_ptr(p) != TEX_NULL) {
-            uint64_t pos;
-            if (getpos(LIGATURE_NODE_lig_ptr(p), &pos)) jpos("src", pos);
-        }
+        if (rtx_pb) jlig_src(p);
         break;
     }
     case DISC_NODE:
@@ -1316,7 +1501,7 @@ static void ser_node(int32_t p, int mode, hyctx *hy) {
         case GLYPH_NODE:
             jcstr("t", "G");
             jint("f", NATIVE_NODE_font(p)); jint("g", NATIVE_NODE_glyph(p));
-            if (rtx_pb) jnode_src(p);
+            if (rtx_pb) jchar_src(p);
             note_glyph(NATIVE_NODE_font(p), NATIVE_NODE_glyph(p));
             jint("w", BOX_width(p)); jint("h", BOX_height(p)); jint("d", BOX_depth(p));
             break;

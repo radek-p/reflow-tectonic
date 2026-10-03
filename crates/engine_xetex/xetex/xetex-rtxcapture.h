@@ -53,9 +53,18 @@ extern int rtx_fork_pending;      /* a display asks for width samples */
  * came from: a column of the current file line, or a token-list node. */
 extern unsigned char *rtx_pb;    /* a position byte per mem word; NULL when off */
 extern int32_t rtx_tok_node, rtx_tok_col, rtx_tok_line, rtx_tok_tag;
-#define RTX_TOK_FILE() do { if (rtx_pb) { rtx_tok_node = TEX_NULL; rtx_tok_col = cur_input.loc - cur_input.start; \
+/* the tokens read before it, newest last (a token backed up or stored can be one
+ * read a little earlier: \futurelet's second, \expandafter's first) */
+#define RTX_RING 8
+typedef struct { int32_t node, col, line, tag; } rtx_tokrec;
+extern rtx_tokrec rtx_ring[RTX_RING];
+extern unsigned rtx_ring_i;
+#define RTX_TOK_SAVE() (rtx_ring_i = (rtx_ring_i + 1) & (RTX_RING - 1), \
+    rtx_ring[rtx_ring_i].node = rtx_tok_node, rtx_ring[rtx_ring_i].col = rtx_tok_col, \
+    rtx_ring[rtx_ring_i].line = rtx_tok_line, rtx_ring[rtx_ring_i].tag = rtx_tok_tag)
+#define RTX_TOK_FILE() do { if (rtx_pb) { RTX_TOK_SAVE(); rtx_tok_node = TEX_NULL; rtx_tok_col = cur_input.loc - cur_input.start; \
     rtx_tok_line = line; rtx_tok_tag = cur_input.synctex_tag; } } while (0)
-#define RTX_TOK_NODE() do { if (rtx_pb) rtx_tok_node = cur_input.loc; } while (0)
+#define RTX_TOK_NODE() do { if (rtx_pb) { RTX_TOK_SAVE(); rtx_tok_node = cur_input.loc; } } while (0)
 /* this token node (a macro argument, a backed-up token) is the token just read */
 #define RTX_TOKPOS(q) do { if (rtx_pb) rtx_tokpos(q); } while (0)
 #define RTX_SRC(call) do { if (rtx_pb) call; } while (0)
@@ -68,16 +77,25 @@ void rtx_copytok(int32_t from, int32_t to);
 void rtx_macro_enter(void);
 void rtx_macro_push(void);
 void rtx_list_push(void);
+void rtx_back_begin(void);
+void rtx_back_push(void);
+void rtx_back_tok(int32_t q);
 void rtx_char_num(void);
-void rtx_char_node(int32_t p);
 void rtx_partial_begin(int32_t s, int32_t r);
 void rtx_partial_copy(int32_t q);
 void rtx_native_char(void);
 void rtx_native_collected(void);
 void rtx_native_done(void);
+void rtx_tfm_char(int32_t p);
+void rtx_made_char(int32_t p);
+void rtx_hu_from(int i, int32_t node);
+void rtx_hu_hyph(int i);
+void rtx_hu_char(int32_t p, int i);
+void rtx_char_copy(int32_t from, int32_t to);
 void rtx_merge_words(int32_t merged, int32_t chain);
 void rtx_noad_done(int32_t q);
 void rtx_lr_done(int32_t q);
+void rtx_mark_from(int32_t field, int32_t list);
 #define RTX_MARK(p, bit) do { if (rtx_nb) rtx_nb[p] |= (bit); } while (0)
 
 int rtx_set_variable(const char *name, int value);

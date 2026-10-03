@@ -470,7 +470,9 @@ void math_radical(void)
     mem[cur_list.tail + 1].b32 = empty;
     mem[cur_list.tail + 3].b32 = empty;
     mem[cur_list.tail + 2].b32 = empty;
+    RTX_SRC(rtx_char_num());                     /* \radical's own position, before its number is scanned */
     scan_delimiter(cur_list.tail + 4, true);
+    RTX_SRC(rtx_fieldpos(cur_list.tail + 4));   /* the radical sign: where \radical was */
     scan_math(cur_list.tail + 1);
 }
 
@@ -500,6 +502,7 @@ void math_ac(void)
     mem[cur_list.tail + 3].b32 = empty;
     mem[cur_list.tail + 2].b32 = empty;
     mem[cur_list.tail + 4].b32.s1 = MATH_CHAR;
+    RTX_SRC(rtx_char_num());                     /* \mathaccent's own position, before its number is scanned */
     if (cur_chr == 1) {
         if (scan_keyword("fixed"))
             mem[cur_list.tail].b16.s0 = FIXED_ACC;
@@ -528,6 +531,7 @@ void math_ac(void)
     else
         mem[cur_list.tail + 4].b16.s1 = math_fam(cur_val);
     mem[cur_list.tail + 4].b16.s1 = mem[cur_list.tail + 4].b16.s1 + (math_char(cur_val) / 65536L) * 256;
+    RTX_SRC(rtx_fieldpos(cur_list.tail + 4));   /* the accent: where \mathaccent was */
     scan_math(cur_list.tail + 1);
 }
 
@@ -1820,6 +1824,7 @@ make_radical(int32_t q)
         }
     }
     y = var_delimiter(q + 4, cur_size, mem[x + 3].b32.s1 + mem[x + 2].b32.s1 + clr + rule_thickness);
+    RTX_SRC(rtx_mark_from(q + 4, y));            /* the sign its own position, not the radicand's */
     if (((font_area[f] == OTGR_FONT_FLAG) && (isOpenTypeMathFont(font_layout_engine[f])))) {
         mem[y + 2].b32.s1 = mem[y + 3].b32.s1 + mem[y + 2].b32.s1 - rule_thickness;
         mem[y + 3].b32.s1 = rule_thickness;
@@ -2023,6 +2028,7 @@ make_math_accent(int32_t q)
         } else
             mem[y + 4].b32.s1 = s + half(w - mem[y + 1].b32.s1);
         mem[y + 1].b32.s1 = 0;
+        RTX_SRC(rtx_mark_from(q + 4, y));        /* the accent its own position, not the nucleus's */
         if (((mem[q].b16.s0 == BOTTOM_ACC) || (mem[q].b16.s0 == (BOTTOM_ACC + 1)))) {
             mem[x].b32.s1 = y;
             y = vpackage(x, 0, ADDITIONAL, MAX_HALFWORD);

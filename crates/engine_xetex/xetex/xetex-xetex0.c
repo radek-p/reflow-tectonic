@@ -4970,12 +4970,13 @@ void end_token_list(void)
 void back_input(void)
 {
     int32_t p;
+    RTX_SRC(rtx_back_begin());   /* before the used-up lists end: the token's origin */
     while ((cur_input.state == TOKEN_LIST) && (cur_input.loc == TEX_NULL)
            && (cur_input.index != V_TEMPLATE))
         end_token_list();
     p = get_avail();
     mem[p].b32.s0 = cur_tok;
-    RTX_TOKPOS(p);
+    RTX_SRC(rtx_back_tok(p));
     if (cur_tok < RIGHT_BRACE_LIMIT) {
 
         if (cur_tok < LEFT_BRACE_LIMIT)
@@ -4996,6 +4997,7 @@ void back_input(void)
     cur_input.start = p;
     cur_input.index = BACKED_UP;
     cur_input.loc = p;
+    RTX_SRC(rtx_back_push());
 }
 
 void
@@ -15292,9 +15294,11 @@ void make_accent(void)
     scaled_t a, h, x, w, delta, lsb, rsb;
     b16x4 i;
 
+    RTX_SRC(rtx_char_num());      /* the accent: where \accent was */
     scan_char_num();
     f = eqtb[CUR_FONT_LOC].b32.s1;
     p = new_character(f, cur_val);
+    RTX_SRC(rtx_made_char(p));
 
     if (p != TEX_NULL) {
         x = font_info[X_HEIGHT_CODE + param_base[f]].b32.s1;
@@ -15311,10 +15315,13 @@ void make_accent(void)
         f = eqtb[CUR_FONT_LOC].b32.s1;
         if ((cur_cmd == LETTER) || (cur_cmd == OTHER_CHAR) || (cur_cmd == CHAR_GIVEN)) {
             q = new_character(f, cur_chr);
+            RTX_SRC(rtx_made_char(q));
             cur_val = cur_chr;
         } else if (cur_cmd == CHAR_NUM) {
+            RTX_SRC(rtx_char_num());
             scan_char_num();
             q = new_character(f, cur_val);
+            RTX_SRC(rtx_made_char(q));
         } else
             back_input();
         if (q != TEX_NULL) { /*1160: */
@@ -18038,7 +18045,7 @@ collected:
     RTX_STAMP(lig_stack);
     cur_l = cur_chr;
     mem[lig_stack].b16.s0 = cur_l;
-    RTX_SRC(rtx_char_node(lig_stack));
+    RTX_SRC(rtx_tfm_char(lig_stack));
     cur_q = cur_list.tail;
 
     if (cancel_boundary) {
@@ -18216,7 +18223,7 @@ main_loop_lookahead_1:
     RTX_STAMP(lig_stack);
     cur_r = cur_chr;
     mem[lig_stack].b16.s0 = cur_r;
-    RTX_SRC(rtx_char_node(lig_stack));
+    RTX_SRC(rtx_tfm_char(lig_stack));
 
     if (cur_r == false_bchar)
         cur_r = TOO_BIG_CHAR; /*:1073 */

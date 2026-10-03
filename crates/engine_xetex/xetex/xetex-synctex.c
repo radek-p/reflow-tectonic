@@ -6,6 +6,7 @@
 #include "xetex-core.h"
 #include "xetex-xetexd.h"
 #include "xetex-synctex.h"
+#include "xetex-rtxcapture.h"
 #include "tectonic_bridge_core.h"
 
 #include <stdio.h>
@@ -322,7 +323,11 @@ synctex_prepare_content(void)
  */
 void synctex_start_input(void)
 {
-    if (synctex_ctxt.flags.off) {
+    /* reflowtex capture: every file gets its tag even when SyncTeX is off -- the
+     * capture names files by these tags, and a shipout with \synctex=0
+     * turns SyncTeX off (synctex_prepare_content), which left every file
+     * opened after the first page with tag 0 */
+    if (synctex_ctxt.flags.off && !RTX_ON) {
         return;
     }
     /*  synctex_tag_counter is a counter uniquely identifying the file actually
@@ -341,6 +346,8 @@ void synctex_start_input(void)
         return;
     }
     cur_input.synctex_tag = (int) synctex_ctxt.synctex_tag_counter;     /*  -> *TeX.web  */
+    if (synctex_ctxt.flags.off)
+        return;
     if (synctex_ctxt.synctex_tag_counter == 1) {
         /*  this is the first file TeX ever opens, in general \jobname.tex we
          *  do not know yet if synchronization will ever be enabled so we have

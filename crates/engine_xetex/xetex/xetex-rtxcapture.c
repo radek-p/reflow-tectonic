@@ -1334,6 +1334,68 @@ static void word_points(int32_t p, hyctx *hy) {
     if (any) { jclose(']'); jkey("hr"); jopen('['); jnum(first); jnum(end); jclose(']'); }
 }
 
+/* ── 8-bit (TFM) words: hyphenation points ─────────────────────────────
+ * TeX inserts discretionaries only in line_break's second pass, after this
+ * capture has written the paragraph: a native word gets its points from
+ * word_points, and an 8-bit word got none, so a T1/OT1 paragraph never
+ * hyphenated in the reader. A TFM word here: a run of character nodes,
+ * ligatures and font kerns in one font, at the paragraph's top level; its
+ * letters are the characters (a ligature's original ones); points as for a
+ * native word (§923ff on its first run of letters, leading non-letters
+ * skipped), written on the run's first node as "hy": letter indices (from the
+ * run's first letter, 0-based) a hyphen may go before. The converter makes
+ * the discretionaries. */
+static int32_t tfm_hy_node = TEX_NULL, tfm_run_end = TEX_NULL;
+static int tfm_hy_n = 0;
+static int tfm_hy[HYPHENATABLE_LENGTH_LIMIT + 4];
+static bool tfm_run_node(int32_t q, int f) {
+    if (q == TEX_NULL) return false;
+    if (is_char_node(q)) return CHAR_NODE_font(q) == f;
+    if (NODE_type(q) == LIGATURE_NODE) return LIGATURE_NODE_lig_font(q) == f;
+    return NODE_type(q) == KERN_NODE && NODE_subtype(q) == NORMAL;
+}
+static void tfm_word_points(int32_t p, hyctx *hy) {
+    if (tfm_run_end != TEX_NULL) { if (p != tfm_run_end) return; tfm_run_end = TEX_NULL; }   /* inside a run already scanned */
+    if (!(is_char_node(p) || NODE_type(p) == LIGATURE_NODE)) return;
+    int f = is_char_node(p) ? CHAR_NODE_font(p) : LIGATURE_NODE_lig_font(p);
+    int32_t end = p;
+    while (tfm_run_node(end, f)) end = LLIST_link(end);
+    tfm_run_end = end;
+    tfm_hy_node = TEX_NULL; tfm_hy_n = 0;
+    int32_t hyf_ch = hyphen_char[f];
+    if (hyf_ch < 0 || hyf_ch > 255 || trie_not_ready) return;
+    if (hy->lhm + hy->rhm > max_hyphenatable_length()) return;
+    int32_t hidx = hyph_index_for(hy->lang);
+    static int32_t codes[HYPHENATABLE_LENGTH_LIMIT + 4];
+    static unsigned char hyf[HYPHENATABLE_LENGTH_LIMIT + 4];
+    int hn = 0, first = -1, k = 0;
+    bool done = false;
+    for (int32_t q = p; q != end && !done; q = LLIST_link(q)) {
+        int32_t one[1], *cs = one, nc = 0;
+        static int32_t lig[HYPHENATABLE_LENGTH_LIMIT + 4];
+        if (is_char_node(q)) { one[0] = CHAR_NODE_character(q); nc = 1; }
+        else if (NODE_type(q) == LIGATURE_NODE) {
+            cs = lig;
+            for (int32_t r = LIGATURE_NODE_lig_ptr(q); r != TEX_NULL && nc < HYPHENATABLE_LENGTH_LIMIT; r = LLIST_link(r)) lig[nc++] = CHAR_NODE_character(r);
+        }
+        for (int i = 0; i < nc; i++, k++) {
+            int32_t code = hyph_code(cs[i], hidx);
+            if (code == 0) { if (hn > 0) { done = true; break; } continue; }
+            if (hn == 0) { first = k; if (!(code == cs[i] || INTPAR(uc_hyph) > 0)) return; }
+            if (hn + 1 > max_hyphenatable_length()) { done = true; break; }
+            codes[++hn] = code;
+        }
+    }
+    if (hn < hy->lhm + hy->rhm) return;
+    rtx_hyphenate(codes, hn, hy->lang, hy->lhm, hy->rhm, hyf);
+    for (int j = hy->lhm; j <= hn - hy->rhm; j++) if (hyf[j] & 1) tfm_hy[tfm_hy_n++] = first + j;
+    if (tfm_hy_n) tfm_hy_node = p;
+}
+static void jtfm_points(int32_t p) {
+    if (p != tfm_hy_node || !tfm_hy_n) return;
+    jkey("hy"); jopen('['); for (int i = 0; i < tfm_hy_n; i++) jnum(tfm_hy[i]); jclose(']');
+}
+
 static uint16_t *glyph_ids(int32_t p) {
     FixedPoint *loc = (FixedPoint *) NATIVE_NODE_glyph_info_ptr(p);
     return (uint16_t *) (loc + NATIVE_NODE_glyph_count(p));
@@ -1472,6 +1534,7 @@ static void ser_node(int32_t p, int mode, hyctx *hy) {
         note_glyph(CHAR_NODE_font(p), CHAR_NODE_character(p));
         if (rtx_pb) jchar_src(p);
         if (rtx_ab) jattrs(p);
+        if (hy && hy->on) jtfm_points(p);
         jclose('}');
         return;
     }
@@ -1526,6 +1589,7 @@ static void ser_node(int32_t p, int mode, hyctx *hy) {
         for (int32_t q = LIGATURE_NODE_lig_ptr(p); q != TEX_NULL; q = LLIST_link(q)) jnum(CHAR_NODE_character(q));
         jclose(']');
         if (rtx_pb) jlig_src(p);
+        if (hy && hy->on) jtfm_points(p);
         break;
     }
     case DISC_NODE:
@@ -1613,7 +1677,8 @@ static void ser_node(int32_t p, int mode, hyctx *hy) {
 
 static void ser_list(int32_t p, int mode, hyctx *hy) {
     jopen('[');
-    for (; p != TEX_NULL; p = LLIST_link(p)) ser_node(p, mode, hy);
+    if (hy && hy->on) tfm_run_end = TEX_NULL;
+    for (; p != TEX_NULL; p = LLIST_link(p)) { if (hy && hy->on) tfm_word_points(p, hy); ser_node(p, mode, hy); }
     jclose(']');
 }
 

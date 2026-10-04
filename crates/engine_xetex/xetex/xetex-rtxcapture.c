@@ -2296,6 +2296,13 @@ void rtx_finish(void) {
         } else {
             jkey("area"); jtexstr(font_area[f]);
         }
+        /* the font's hyphen character too, typeset or not: a discretionary's pre-break hyphen hangs into the
+           margin by its \rpcode (microtype), and the reader's breaker needs that code for every break at one */
+        if (hyphen_char[f] > 0 && hyphen_char[f] < 0x110000) {
+            int32_t hg = engine ? map_char_to_glyph(f, hyphen_char[f]) : hyphen_char[f];
+            if (hg > 0 && hg < (1 << 21) && (engine || (!is_native(f) && hg >= font_bc[f] && hg <= font_ec[f])))
+                fonts_used[f].bits[hg >> 3] |= 1 << (hg & 7);
+        }
         /* glyphs (native: ids) or characters (TFM) used */
         jkey("g"); jopen('[');
         for (uint32_t g = 0; g < (1u << 21); g++) {

@@ -444,11 +444,13 @@ static wpos *get_word_pos(int32_t node) {
 }
 
 /* macro call sites, by input-stack level */
-typedef struct { uint64_t pos; int32_t start; bool set; bool exact; } origin;
+typedef struct { uint64_t pos; int32_t start; bool set; bool exact; bool own; } origin;
 static origin *origins = NULL;
 static int norigins = 0;
 static uint64_t macro_cs_pos = 0;
-static bool macro_cs_known = false;
+static bool macro_cs_known = false, macro_cs_own = false;
+/* (active characters) the origin via_origin and tok_pos found last is an "own" one: see rtx_macro_enter */
+static bool via_own = false, tok_own = false;
 
 static unsigned char *user_tags = NULL;
 static int n_user_tags = 0;
@@ -480,6 +482,7 @@ static bool user_tag(int tag);
 static bool via_origin(uint64_t *pos) {
     bool found = false;
     int at = -1;
+    via_own = false;
     for (int k = input_ptr; k >= 0; k--) {
         input_state_t *l = level(k);
         if (l->state != TOKEN_LIST) {
@@ -492,9 +495,10 @@ static bool via_origin(uint64_t *pos) {
         }
         if (k < norigins && origins[k].set && origins[k].start == l->start) {
             *pos = origins[k].pos; found = true; at = k;
-            if (origins[k].exact) break;      /* the innermost call whose own token has a position */
+            if (origins[k].exact || origins[k].own) break;      /* the innermost call whose own token has a position (or that stands for itself: an active character) */
         }
     }
+    if (at >= 0 && origins[at].own) { via_own = true; return true; }     /* (an active character) */
     if (at >= 0) {
         int span = POS_SPAN(*pos);
         for (int k = input_ptr; k >= at; k--)
@@ -547,8 +551,12 @@ static bool tok_pos(uint64_t *pos) {
         *pos = mkpos(rtx_tok_tag, rtx_tok_line, rtx_tok_col, false);
         return true;
     }
+    tok_own = false;
     if (getpos(rtx_tok_node, pos)) return true;
-    if (via_origin(pos)) { *pos |= POS_VIA; return true; }
+    if (via_origin(pos)) {
+        if (via_own) { tok_own = true; *pos = POS_BASE(*pos) & ~POS_VIA; return true; }   /* (an active character) */
+        *pos |= POS_VIA; return true;
+    }
     return false;
 }
 
@@ -581,8 +589,14 @@ void rtx_partial_copy(int32_t q) {
     if (col >= 0) setpos(q, mkpos(POS_TAG(partial_base), POS_LINE(partial_base), col, false), mem[q].b32.s0);
 }
 
+/* (active characters) An active character above 127 read from the document stands for itself: what its
+ * definition typesets is placed at the character, not "via" a call (rtx-tfm-unicode.sty makes "ń" a
+ * command that gives T1's ń in an 8-bit font; inputenc's characters on pdfTeX are the same). Its
+ * origin is "own": glyphs made under it get its position as their own, length one. */
 void rtx_macro_enter(void) {
+    tok_own = false;
     macro_cs_known = tok_pos(&macro_cs_pos);
+    macro_cs_own = macro_cs_known && (tok_own || (!(macro_cs_pos & POS_VIA) && cur_cs >= ACTIVE_BASE + 128 && cur_cs < SINGLE_BASE));
 }
 
 static void origins_fit(void) {
@@ -633,14 +647,16 @@ void rtx_list_push(void) {
     origins_fit();
     origins[input_ptr].set = false;
     uint64_t p;
-    if (tok_pos(&p)) { origins[input_ptr].set = true; origins[input_ptr].pos = extend(p | POS_VIA); origins[input_ptr].start = cur_input.start; origins[input_ptr].exact = !(p & POS_VIA); }
+    origins[input_ptr].own = false;
+    if (tok_pos(&p)) { origins[input_ptr].set = true; origins[input_ptr].pos = extend(p | POS_VIA); origins[input_ptr].start = cur_input.start; origins[input_ptr].exact = !(p & POS_VIA); origins[input_ptr].own = tok_own; }
 }
 
 void rtx_macro_push(void) {
     origins_fit();
     origins[input_ptr].set = macro_cs_known;
     origins[input_ptr].exact = macro_cs_known && !(macro_cs_pos & POS_VIA);
-    origins[input_ptr].pos = macro_cs_known ? extend(macro_cs_pos | POS_VIA) : 0;
+    origins[input_ptr].pos = macro_cs_known ? (macro_cs_own ? macro_cs_pos | POS_VIA : extend(macro_cs_pos | POS_VIA)) : 0;
+    origins[input_ptr].own = macro_cs_own;
     origins[input_ptr].start = cur_input.start;
 }
 
@@ -712,7 +728,7 @@ static bool first_after_end(void) {
 }
 
 static uint64_t back_pos, back_org;
-static bool back_known = false, back_org_known = false;
+static bool back_known = false, back_org_known = false, back_org_own = false;
 void rtx_back_begin(void) {
     /* the token's own position (from the file, or its node's) */
     back_known = tok_own_pos(cur_tok, &back_pos);
@@ -722,7 +738,8 @@ void rtx_back_begin(void) {
     if (cur_input.state != TOKEN_LIST && rtx_tok_node == TEX_NULL && ended_known && first_after_end()) {
         back_org = ended_call;          /* a peek after a call: the call's (above) */
         back_org_known = true;
-    } else back_org_known = via_origin(&back_org);
+        back_org_own = false;
+    } else { back_org_known = via_origin(&back_org); back_org_own = back_org_known && via_own; }   /* own: an active character's */
 }
 /* the backed-up token keeps its own position (a via one is found where it is used) */
 void rtx_back_tok(int32_t q) { if (back_known && !(back_pos & POS_VIA)) setpos(q, back_pos, mem[q].b32.s0); }
@@ -731,6 +748,7 @@ void rtx_back_push(void) {
     origins[input_ptr].set = back_org_known;
     origins[input_ptr].exact = false;
     origins[input_ptr].pos = back_org_known ? back_org | POS_VIA : 0;
+    origins[input_ptr].own = back_org_own;     /* a token backed up after an own call ended (\\ss: \\csname's result) */
     origins[input_ptr].start = cur_input.start;
 }
 

@@ -8,7 +8,7 @@
  * typesets, except RTX_PAGELESS, which hands the page builder zero-height
  * originals (as reflowtex's LuaTeX capture does).
  *
- * Copyright 2026 Radosław Piórkowski. MIT licence, like Tectonic.
+ * Copyright 2026 Radosław Piórkowski. SPDX-License-Identifier: AGPL-3.0-or-later (reflow/LICENSE).
  */
 
 #include "xetex-core.h"

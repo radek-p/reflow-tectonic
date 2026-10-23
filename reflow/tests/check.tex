@@ -1,0 +1,25 @@
+% SPDX-License-Identifier: AGPL-3.0-or-later
+% reflow/build.sh check: the engine and the format just built typeset this, with the capture on. It touches what
+% the reflow patches handle: 8-bit (T1) fonts, ligatures, hyphenation, accents, macros that read ahead, maths
+% constructions, a footnote.
+\documentclass{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\begin{document}
+\section*{Reflow: a check}
+\parbox{9em}{Difficult stuff: reflowing typographically sophisticated paragraphs efficiently is
+surprisingly hard.}
+
+Accents as commands: na\"ive caf\'e, \c{c}a, f\^ete, \v{r}\'{\i}j\'en, Gda\'nsk, \L{}\'od\'z, Stra\ss e.\footnote{A footnote with ffi and fl.}
+
+A line break with an optional argument\\[2pt]
+and a starred section command:
+\subsection*{Starred}
+
+Maths: $\sqrt{x} + \sqrt[3]{y} + \hat{a} + \bar{b} = \sum_{i=1}^{n} \frac{i}{2}$ and
+\begin{align}
+  f(x) &= \int_0^x e^{-t^2} \, dt, \\
+  g(x) &= \left( \frac{1}{1 + x^2} \right)^{\!2}.
+\end{align}
+\end{document}

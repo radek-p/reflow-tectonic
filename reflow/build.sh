@@ -10,7 +10,7 @@
 #   reflow/build.sh tree      reflow/dist/tree/texlive/2022/: the TeX Live tree the engine reads beside its page (the
 #                             set in reflow/tree/starting-set.txt; packages from TeX Live 2022's final archive, checked
 #                             against its sha512s, cached in $TEXLIVE_ARCHIVE, else reflow/.cache/texlive-archive)
-#   reflow/build.sh check     the engine and the format typeset reflow/tests/hello.tex
+#   reflow/build.sh check     the engine and the format typeset reflow/tests/check.tex (the hard cases)
 #   reflow/build.sh package   reflow/dist/release/: the release assets (the engine, latex.fmt.gz, the tree as
 #                             texlive-tree.tar.gz, STAMP.txt, SHA256SUMS)
 #   reflow/build.sh all       the seven in turn
@@ -50,12 +50,13 @@ wasm() {
 format() { in_node node reflow/node/tectonic-node.ts format; }
 tree() { in_node node reflow/tree/build-tree.ts "$@"; }
 check() {
-  # the engine and the format just built typeset a small document: status 0 (or 1, warnings), an .xdv and the
-  # capture (hello.rtxc.jsonl)
+  # the engine and the format just built typeset reflow/tests/check.tex: status 0 (or 1, warnings), an .xdv, the
+  # capture (check.rtxc.jsonl), and no error or missing character in the log
   in_node bash -c 'set -e; rm -rf /tmp/out
-    node reflow/node/tectonic-node.ts compile reflow/tests/hello.tex --out /tmp/out 2> /tmp/log || true
-    cat /tmp/log; grep -Eq "^status [01];" /tmp/log; test -s /tmp/out/hello.xdv; test -s /tmp/out/hello.rtxc.jsonl
-    echo "check: hello.tex typeset, $(wc -c < /tmp/out/hello.xdv) bytes of XDV, $(wc -l < /tmp/out/hello.rtxc.jsonl) capture records"'
+    node reflow/node/tectonic-node.ts compile reflow/tests/check.tex --out /tmp/out 2> /tmp/log || true
+    cat /tmp/log; grep -Eq "^status [01];" /tmp/log; test -s /tmp/out/check.xdv; test -s /tmp/out/check.rtxc.jsonl
+    if grep -E "Missing character|^! " /tmp/out/check.log; then echo "check: the log has errors"; exit 1; fi
+    echo "check: check.tex typeset, $(wc -c < /tmp/out/check.xdv) bytes of XDV, $(wc -l < /tmp/out/check.rtxc.jsonl) capture records"'
 }
 package() {
   # the release assets, with their checksums: the engine, the format, the tree as one tarball

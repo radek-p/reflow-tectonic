@@ -23,9 +23,11 @@ NODE=node:24             # (not -slim: the tree step needs xz)
 CACHE="${TECTONIC_CACHE:-$ROOT/reflow/.cache/tectonic-bundle}"         # Tectonic's bundle, read in chunks
 ARCHIVE="${TEXLIVE_ARCHIVE:-$ROOT/reflow/.cache/texlive-archive}"       # TeX Live's archive files
 TARGET="${REFLOW_TARGET:-reflow-tectonic-target}"                         # a Docker volume, or an absolute path
-in_image() { docker run --rm --platform linux/amd64 -v "$ROOT":/work -w /work -v "$TARGET":/target "$IMAGE" bash -lc "$*"; }
+# the host directories are made here, before Docker binds them (Docker would make them, and their parents, as root)
+mkdirs() { mkdir -p "$CACHE" "$ARCHIVE"; case "$TARGET" in /*) mkdir -p "$TARGET" ;; esac; }
+in_image() { mkdirs; docker run --rm --platform linux/amd64 -v "$ROOT":/work -w /work -v "$TARGET":/target "$IMAGE" bash -lc "$*"; }
 in_node() {
-  mkdir -p "$CACHE" "$ARCHIVE"
+  mkdirs
   docker run --rm -v "$ROOT":/work -w /work -v "$CACHE":/cache -e TECTONIC_CACHE=/cache \
     -v "$ARCHIVE":/archive -e TEXLIVE_ARCHIVE=/archive "$NODE" "$@"
 }

@@ -1,0 +1,29 @@
+[package]
+name = "reflow_wasm_driver"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The reflow engine: Tectonic XeTeX with the capture API, for WebAssembly (a block warm-snapshot hook)"
+license = "AGPL-3.0-or-later"
+
+[[bin]]
+name = "tectonic_wasm"
+path = "src/main.rs"
+
+# Tectonic crates of this repository (with the reflow patches), used by path.
+[dependencies]
+tectonic_bridge_core = { path = "../../crates/bridge_core" }
+tectonic_engine_xetex = { path = "../../crates/engine_xetex" }
+tectonic_engine_xdvipdfmx = { path = "../../crates/engine_xdvipdfmx" }
+tectonic_io_base = { path = "../../crates/io_base" }
+tectonic_status_base = { path = "../../crates/status_base" }
+tectonic_errors = { path = "../../crates/errors" }
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+lto = false
+debug = false
+
+# its own workspace: not a member of Tectonic's
+[workspace]

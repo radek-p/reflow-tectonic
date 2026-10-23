@@ -1,0 +1,5 @@
+# built by reflow/build.sh
+/dist/
+/deps/prefix/
+/deps/src/
+/.cache/

@@ -1,0 +1,9 @@
+# TeX Live packages the server's tree needs beyond starting-set.txt's closure, read by
+# build-tree.ts with the set. One TeX Live name per line; each comes with its own closure, like the set's entries.
+#
+# These are dependencies TeX Live does not record: a package in the set loads them, but its tlpdb entry has no
+# `depend` line for them, so the closure misses them. Found by loading each package (ReflowEd's tests/test-resources.ts
+# --verify-set --added).
+
+# standalone and gincltex \RequirePackage{svn-prov}; only collection-latexextra and ctex depend on it in the tlpdb
+svn-prov

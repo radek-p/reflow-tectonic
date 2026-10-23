@@ -31,9 +31,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      REFLOW_TARGET: ${{ github.workspace }}/../cache/target
-      TECTONIC_CACHE: ${{ github.workspace }}/../cache/tectonic-bundle
-      TEXLIVE_ARCHIVE: ${{ github.workspace }}/../cache/texlive-archive
+      # outside the checkout, as plain absolute paths (actions/cache takes no "..")
+      REFLOW_TARGET: /home/runner/reflow-cache/target
+      TECTONIC_CACHE: /home/runner/reflow-cache/tectonic-bundle
+      TEXLIVE_ARCHIVE: /home/runner/reflow-cache/texlive-archive
     steps:
       - uses: actions/checkout@v4
 

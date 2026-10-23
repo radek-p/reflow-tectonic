@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# The reflow engine (reflow/build.sh): the WebAssembly engine, its LaTeX format and its TeX Live tree, checked and
+# packaged. Every push to the reflow branch builds them and keeps them as a workflow artifact; a tag reflow-* also
+# publishes them as a release (the assets ReflowEd downloads).
+#
+# Caches, so a run builds only what changed:
+#   the build image        Docker layers (GitHub Actions cache, through buildx)
+#   the C dependencies     reflow/deps/prefix, keyed by reflow/deps and the Dockerfile
+#   the compile output     Cargo's target directory, keyed by the driver's Cargo.lock and the Dockerfile
+#   the TeX files          Tectonic's bundle chunks and TeX Live 2022's archive: fixed snapshots, keyed by the
+#                          tree's package lists
+name: reflow engine
+
+on:
+  push:
+    branches: [reflow]
+    tags: ['reflow-*']
+  pull_request:
+    branches: [reflow]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # the release, on a tag
+
+concurrency:
+  group: reflow-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      REFLOW_TARGET: ${{ github.workspace }}/../cache/target
+      TECTONIC_CACHE: ${{ github.workspace }}/../cache/tectonic-bundle
+      TEXLIVE_ARCHIVE: ${{ github.workspace }}/../cache/texlive-archive
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+      - name: The build image
+        uses: docker/build-push-action@v6
+        with:
+          context: reflow/docker
+          platforms: linux/amd64
+          load: true
+          tags: reflow-tectonic-wasm
+          cache-from: type=gha,scope=reflow-image
+          cache-to: type=gha,mode=max,scope=reflow-image
+
+      - name: Cache the C dependencies
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            reflow/deps/prefix
+            reflow/deps/src
+          key: reflow-deps-${{ hashFiles('reflow/deps/**', 'reflow/docker/Dockerfile') }}
+      - name: The C dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: reflow/build.sh deps
+
+      - name: Cache the compile output
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.REFLOW_TARGET }}
+          key: reflow-target-${{ hashFiles('reflow/driver/Cargo.lock', 'reflow/docker/Dockerfile') }}-${{ github.sha }}
+          restore-keys: reflow-target-${{ hashFiles('reflow/driver/Cargo.lock', 'reflow/docker/Dockerfile') }}-
+      - name: The engine
+        run: reflow/build.sh wasm
+
+      - name: Cache the TeX files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.TECTONIC_CACHE }}
+            ${{ env.TEXLIVE_ARCHIVE }}
+          key: reflow-texfiles-2022-${{ hashFiles('reflow/tree/*.txt') }}-${{ github.sha }}
+          restore-keys: reflow-texfiles-2022-
+      - name: The format
+        run: reflow/build.sh format
+      - name: The TeX tree
+        run: reflow/build.sh tree
+
+      - name: Check
+        run: reflow/build.sh check
+      - name: Package
+        run: |
+          reflow/build.sh package
+          cat reflow/dist/release/STAMP.txt reflow/dist/release/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reflow-engine
+          path: reflow/dist/release/
+          retention-days: 30
+
+      - name: Release (a reflow-* tag)
+        if: startsWith(github.ref, 'refs/tags/reflow-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" reflow/dist/release/* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --notes "The reflow engine at $(git rev-parse --short HEAD): the WebAssembly engine \
+          (tectonic.mjs, tectonic_wasm.wasm), its LaTeX format (latex.fmt.gz) and its TeX Live 2022 tree \
+          (texlive-tree.tar.gz). STAMP.txt names the commit and the wasm's sha256; SHA256SUMS lists every asset's."

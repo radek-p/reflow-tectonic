@@ -10,16 +10,20 @@
 #   reflow/build.sh tree      reflow/dist/tree/texlive/2022/: the TeX Live tree the engine reads beside its page (the
 #                             set in reflow/tree/starting-set.txt; packages from TeX Live 2022's final archive, checked
 #                             against its sha512s, cached in $TEXLIVE_ARCHIVE, else reflow/.cache/texlive-archive)
-#   reflow/build.sh all       the five in turn
-# Needs Docker and git. Every step runs in a container with the repository at /work; the compile cache is the
-# Docker volume reflow-tectonic-target.
+#   reflow/build.sh check     the engine and the format typeset reflow/tests/hello.tex
+#   reflow/build.sh package   reflow/dist/release/: the release assets (the engine, latex.fmt.gz, the tree as
+#                             texlive-tree.tar.gz, STAMP.txt, SHA256SUMS)
+#   reflow/build.sh all       the seven in turn
+# Needs Docker and git. Every step runs in a container with the repository at /work. The compile cache is the
+# Docker volume reflow-tectonic-target, or the directory $REFLOW_TARGET (CI caches that one).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 IMAGE=reflow-tectonic-wasm
 NODE=node:24             # (not -slim: the tree step needs xz)
 CACHE="${TECTONIC_CACHE:-$ROOT/reflow/.cache/tectonic-bundle}"         # Tectonic's bundle, read in chunks
 ARCHIVE="${TEXLIVE_ARCHIVE:-$ROOT/reflow/.cache/texlive-archive}"       # TeX Live's archive files
-in_image() { docker run --rm --platform linux/amd64 -v "$ROOT":/work -w /work -v reflow-tectonic-target:/target "$IMAGE" bash -lc "$*"; }
+TARGET="${REFLOW_TARGET:-reflow-tectonic-target}"                         # a Docker volume, or an absolute path
+in_image() { docker run --rm --platform linux/amd64 -v "$ROOT":/work -w /work -v "$TARGET":/target "$IMAGE" bash -lc "$*"; }
 in_node() {
   mkdir -p "$CACHE" "$ARCHIVE"
   docker run --rm -v "$ROOT":/work -w /work -v "$CACHE":/cache -e TECTONIC_CACHE=/cache \
@@ -43,6 +47,24 @@ wasm() {
 }
 format() { in_node node reflow/node/tectonic-node.ts format; }
 tree() { in_node node reflow/tree/build-tree.ts "$@"; }
+check() {
+  # the engine and the format just built typeset a small document: status 0 (or 1, warnings), an .xdv and the
+  # capture (hello.rtxc.jsonl)
+  in_node bash -c 'set -e; rm -rf /tmp/out
+    node reflow/node/tectonic-node.ts compile reflow/tests/hello.tex --out /tmp/out 2> /tmp/log || true
+    cat /tmp/log; grep -Eq "^status [01];" /tmp/log; test -s /tmp/out/hello.xdv; test -s /tmp/out/hello.rtxc.jsonl
+    echo "check: hello.tex typeset, $(wc -c < /tmp/out/hello.xdv) bytes of XDV, $(wc -l < /tmp/out/hello.rtxc.jsonl) capture records"'
+}
+package() {
+  # the release assets, with their checksums: the engine, the format, the tree as one tarball
+  in_node bash -c 'set -e; R=reflow/dist/release; rm -rf $R; mkdir -p $R
+    cp reflow/dist/async/tectonic.mjs reflow/dist/async/tectonic_wasm.wasm $R/
+    cp reflow/dist/async/STAMP $R/STAMP.txt
+    gzip -9 -n -c reflow/dist/latex.fmt > $R/latex.fmt.gz
+    tar -C reflow/dist/tree --sort=name --owner=0 --group=0 --numeric-owner --mtime=2023-03-01 -czf $R/texlive-tree.tar.gz texlive
+    (cd $R && sha256sum * > SHA256SUMS)
+    ls -la $R'
+}
 
 case "${1:-}" in
   image) image ;;
@@ -50,6 +72,8 @@ case "${1:-}" in
   wasm) wasm ;;
   format) format ;;
   tree) shift; tree "$@" ;;
-  all) image; deps; wasm; format; tree ;;
-  *) sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  check) check ;;
+  package) package ;;
+  all) image; deps; wasm; format; tree; check; package ;;
+  *) sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
